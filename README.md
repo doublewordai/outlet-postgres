@@ -11,8 +11,8 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-outlet = { path = "../outlet" }
-outlet-postgres = { path = "../outlet-postgres" }
+outlet = "0.1.0"
+outlet-postgres = "0.1.0"
 axum = "0.8"
 tokio = { version = "1.0", features = ["full"] }
 tower = "0.5"

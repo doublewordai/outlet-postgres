@@ -349,7 +349,7 @@ mod tests {
         let filter = RequestFilter::default();
         let query = filter.build_query();
         let sql = query.sql();
-        
+
         validate_sql(sql).unwrap();
         assert!(sql.contains("ORDER BY r.timestamp ASC"));
         assert!(!sql.contains("WHERE"));
@@ -363,7 +363,7 @@ mod tests {
         };
         let query = filter.build_query();
         let sql = query.sql();
-        
+
         validate_sql(sql).unwrap();
         assert!(sql.contains("WHERE r.correlation_id = $1"));
     }
@@ -376,7 +376,7 @@ mod tests {
         };
         let query = filter.build_query();
         let sql = query.sql();
-        
+
         validate_sql(sql).unwrap();
         assert!(sql.contains("WHERE r.method = $1"));
     }
@@ -389,7 +389,7 @@ mod tests {
         };
         let query = filter.build_query();
         let sql = query.sql();
-        
+
         validate_sql(sql).unwrap();
         assert!(sql.contains("WHERE r.uri ILIKE $1"));
     }
@@ -402,7 +402,7 @@ mod tests {
         };
         let query = filter.build_query();
         let sql = query.sql();
-        
+
         validate_sql(sql).unwrap();
         assert!(sql.contains("WHERE res.status_code = $1"));
     }
@@ -416,7 +416,7 @@ mod tests {
         };
         let query = filter.build_query();
         let sql = query.sql();
-        
+
         validate_sql(sql).unwrap();
         assert!(sql.contains("WHERE res.status_code >= $1"));
         assert!(sql.contains("AND res.status_code <= $2"));
@@ -424,9 +424,13 @@ mod tests {
 
     #[test]
     fn test_timestamp_filters() {
-        let after = DateTime::parse_from_rfc3339("2023-01-01T00:00:00Z").unwrap().with_timezone(&Utc);
-        let before = DateTime::parse_from_rfc3339("2023-12-31T23:59:59Z").unwrap().with_timezone(&Utc);
-        
+        let after = DateTime::parse_from_rfc3339("2023-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let before = DateTime::parse_from_rfc3339("2023-12-31T23:59:59Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
         let filter = RequestFilter {
             timestamp_after: Some(after),
             timestamp_before: Some(before),
@@ -434,7 +438,7 @@ mod tests {
         };
         let query = filter.build_query();
         let sql = query.sql();
-        
+
         validate_sql(sql).unwrap();
         assert!(sql.contains("WHERE r.timestamp >= $1"));
         assert!(sql.contains("AND r.timestamp <= $2"));
@@ -449,7 +453,7 @@ mod tests {
         };
         let query = filter.build_query();
         let sql = query.sql();
-        
+
         validate_sql(sql).unwrap();
         assert!(sql.contains("WHERE res.duration_ms >= $1"));
         assert!(sql.contains("AND res.duration_ms <= $2"));
@@ -463,7 +467,7 @@ mod tests {
         };
         let query = filter.build_query();
         let sql = query.sql();
-        
+
         validate_sql(sql).unwrap();
         assert!(sql.contains("ORDER BY r.timestamp DESC"));
     }
@@ -476,7 +480,7 @@ mod tests {
         };
         let query = filter.build_query();
         let sql = query.sql();
-        
+
         validate_sql(sql).unwrap();
         assert!(sql.contains("ORDER BY r.timestamp ASC"));
     }
@@ -490,7 +494,7 @@ mod tests {
         };
         let query = filter.build_query();
         let sql = query.sql();
-        
+
         validate_sql(sql).unwrap();
         assert!(sql.contains("LIMIT $1"));
         assert!(sql.contains("OFFSET $2"));
@@ -506,12 +510,12 @@ mod tests {
         };
         let query = filter.build_query();
         let sql = query.sql();
-        
+
         validate_sql(sql).unwrap();
         assert!(sql.contains("WHERE r.correlation_id = $1"));
         assert!(sql.contains("AND r.method = $2"));
         assert!(sql.contains("AND res.status_code = $3"));
-        
+
         // Should not have multiple WHERE clauses
         assert_eq!(sql.matches("WHERE").count(), 1);
         assert!(sql.matches("AND").count() >= 2);
@@ -519,8 +523,10 @@ mod tests {
 
     #[test]
     fn test_complex_filter_combination() {
-        let after = DateTime::parse_from_rfc3339("2023-01-01T00:00:00Z").unwrap().with_timezone(&Utc);
-        
+        let after = DateTime::parse_from_rfc3339("2023-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
         let filter = RequestFilter {
             correlation_id: Some(456),
             method: Some("GET".to_string()),
@@ -537,9 +543,9 @@ mod tests {
         };
         let query = filter.build_query();
         let sql = query.sql();
-        
+
         validate_sql(sql).unwrap();
-        
+
         // Check all filters are present
         assert!(sql.contains("WHERE r.correlation_id = $1"));
         assert!(sql.contains("AND r.method = $2"));
@@ -552,7 +558,7 @@ mod tests {
         assert!(sql.contains("ORDER BY r.timestamp DESC"));
         assert!(sql.contains("LIMIT $9"));
         assert!(sql.contains("OFFSET $10"));
-        
+
         // Should have exactly one WHERE
         assert_eq!(sql.matches("WHERE").count(), 1);
     }
@@ -562,17 +568,19 @@ mod tests {
         let filter = RequestFilter::default();
         let query = filter.build_query();
         let sql = query.sql();
-        
+
         validate_sql(sql).unwrap();
-        
+
         // Should contain base SELECT and JOIN
         assert!(sql.contains("SELECT"));
         assert!(sql.contains("FROM http_requests r"));
-        assert!(sql.contains("LEFT JOIN http_responses res ON r.correlation_id = res.correlation_id"));
-        
+        assert!(
+            sql.contains("LEFT JOIN http_responses res ON r.correlation_id = res.correlation_id")
+        );
+
         // Should not contain WHERE clause
         assert!(!sql.contains("WHERE"));
-        
+
         // Should have default ordering
         assert!(sql.contains("ORDER BY r.timestamp ASC"));
     }

@@ -132,8 +132,8 @@ where
 {
     /// Create a new PostgreSQL handler with a connection pool.
     ///
-    /// This will attempt to connect to the database and run any necessary
-    /// migrations to set up the logging tables.
+    /// This will connect to the database but will NOT run migrations.
+    /// Use `migrator()` to get a migrator and run migrations separately.
     ///
     /// # Arguments
     ///
@@ -154,13 +154,12 @@ where
     ///
     /// #[tokio::main]
     /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    ///     // With custom body type
-    ///     let handler = PostgresHandler::<MyBodyType>::new("postgresql://user:pass@localhost/db").await?;
+    ///     // Run migrations first
+    ///     let pool = sqlx::PgPool::connect("postgresql://user:pass@localhost/db").await?;
+    ///     PostgresHandler::<MyBodyType, MyBodyType>::migrator().run(&pool).await?;
     ///     
-    ///     // With default JSON Value type  
-    ///     let handler = PostgresHandler::<Value>::new("postgresql://user:pass@localhost/db").await?;
-    ///     // or simply:
-    ///     // let handler = PostgresHandler::new("postgresql://user:pass@localhost/db").await?;
+    ///     // Create handler
+    ///     let handler = PostgresHandler::<MyBodyType>::new("postgresql://user:pass@localhost/db").await?;
     ///     Ok(())
     /// }
     /// ```
@@ -168,12 +167,6 @@ where
         let pool = PgPool::connect(database_url)
             .await
             .map_err(PostgresHandlerError::Connection)?;
-
-        // Run migrations
-        sqlx::migrate!("./migrations")
-            .run(&pool)
-            .await
-            .map_err(PostgresHandlerError::Migration)?;
 
         Ok(Self {
             pool,
@@ -185,7 +178,7 @@ where
     /// Create a PostgreSQL handler from an existing connection pool.
     ///
     /// Use this if you already have a connection pool and want to reuse it.
-    /// This will also run migrations on the provided pool.
+    /// This will NOT run migrations - use `migrator()` to run migrations separately.
     ///
     /// # Arguments
     ///
@@ -207,22 +200,62 @@ where
     /// #[tokio::main]
     /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ///     let pool = PgPool::connect("postgresql://user:pass@localhost/db").await?;
+    ///     
+    ///     // Run migrations first
+    ///     PostgresHandler::<MyBodyType, MyBodyType>::migrator().run(&pool).await?;
+    ///     
+    ///     // Create handler
     ///     let handler = PostgresHandler::<MyBodyType>::from_pool(pool).await?;
     ///     Ok(())
     /// }
     /// ```
     pub async fn from_pool(pool: PgPool) -> Result<Self, PostgresHandlerError> {
-        // Run migrations
-        sqlx::migrate!("./migrations")
-            .run(&pool)
-            .await
-            .map_err(PostgresHandlerError::Migration)?;
-
         Ok(Self {
             pool,
             _phantom_req: std::marker::PhantomData,
             _phantom_res: std::marker::PhantomData,
         })
+    }
+
+    /// Get the migrator for running outlet-postgres database migrations.
+    ///
+    /// This returns a SQLx migrator that can be used to set up the required
+    /// `http_requests` and `http_responses` tables. The consuming application
+    /// is responsible for running these migrations at the appropriate time
+    /// and in the appropriate database schema.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use outlet_postgres::PostgresHandler;
+    /// use sqlx::{PgPool, Executor};
+    /// use serde_json::Value;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let pool = PgPool::connect("postgresql://user:pass@localhost/db").await?;
+    ///     
+    ///     // Run outlet migrations in a specific schema
+    ///     sqlx::query("SET search_path = 'outlet'").execute(&pool).await?;
+    ///     PostgresHandler::<Value, Value>::migrator().run(&pool).await?;
+    ///     sqlx::query("SET search_path = 'public'").execute(&pool).await?;
+    ///     
+    ///     // Create handler with schema-specific pool configured for outlet schema
+    ///     let outlet_pool = sqlx::postgres::PgPoolOptions::new()
+    ///         .after_connect(|conn, _meta| {
+    ///             Box::pin(async move {
+    ///                 conn.execute("SET search_path = 'outlet';").await?;
+    ///                 Ok(())
+    ///             })
+    ///         })
+    ///         .connect("postgresql://user:pass@localhost/db")
+    ///         .await?;
+    ///     let handler = PostgresHandler::<Value, Value>::from_pool(outlet_pool).await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub fn migrator() -> sqlx::migrate::Migrator {
+        sqlx::migrate!("./migrations")
     }
 
     /// Convert headers to a JSONB-compatible format.
@@ -360,5 +393,533 @@ where
         } else {
             debug!(correlation_id = %correlation_id, "Response data inserted successfully");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use chrono::{DateTime, Utc};
+    use outlet::{RequestData, ResponseData};
+    use serde::{Deserialize, Serialize};
+    use serde_json::Value;
+    use sqlx::PgPool;
+    use std::collections::HashMap;
+    use std::time::{Duration, SystemTime};
+
+    #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+    struct TestRequest {
+        user_id: u64,
+        action: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+    struct TestResponse {
+        success: bool,
+        message: String,
+    }
+
+    fn create_test_request_data() -> RequestData {
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), vec!["application/json".into()]);
+        headers.insert("user-agent".to_string(), vec!["test-client/1.0".into()]);
+
+        let test_req = TestRequest {
+            user_id: 123,
+            action: "create_user".to_string(),
+        };
+        let body = serde_json::to_vec(&test_req).unwrap();
+
+        RequestData {
+            method: http::Method::POST,
+            uri: http::Uri::from_static("/api/users"),
+            headers,
+            body: Some(Bytes::from(body)),
+            timestamp: SystemTime::now(),
+            correlation_id: 0,
+        }
+    }
+
+    fn create_test_response_data() -> ResponseData {
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), vec!["application/json".into()]);
+
+        let test_res = TestResponse {
+            success: true,
+            message: "User created successfully".to_string(),
+        };
+        let body = serde_json::to_vec(&test_res).unwrap();
+
+        ResponseData {
+            status: http::StatusCode::CREATED,
+            headers,
+            body: Some(Bytes::from(body)),
+            timestamp: SystemTime::now(),
+            duration: Duration::from_millis(150),
+            correlation_id: 0,
+        }
+    }
+
+    #[sqlx::test]
+    async fn test_handler_creation(pool: PgPool) {
+        // Run migrations first
+        PostgresHandler::<TestRequest, TestResponse>::migrator()
+            .run(&pool)
+            .await
+            .unwrap();
+
+        let handler = PostgresHandler::<TestRequest, TestResponse>::from_pool(pool.clone())
+            .await
+            .unwrap();
+
+        // Verify we can get a repository
+        let repository = handler.repository();
+
+        // Test initial state - no requests logged yet
+        let filter = RequestFilter::default();
+        let results = repository.query(filter).await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[sqlx::test]
+    async fn test_handle_request_with_typed_body(pool: PgPool) {
+        // Run migrations first
+        PostgresHandler::<TestRequest, TestResponse>::migrator()
+            .run(&pool)
+            .await
+            .unwrap();
+
+        let handler = PostgresHandler::<TestRequest, TestResponse>::from_pool(pool.clone())
+            .await
+            .unwrap();
+        let repository = handler.repository();
+
+        let request_data = create_test_request_data();
+        let correlation_id = 12345;
+
+        // Handle the request
+        handler
+            .handle_request(request_data.clone(), correlation_id)
+            .await;
+
+        // Query back the request
+        let filter = RequestFilter {
+            correlation_id: Some(correlation_id as i64),
+            ..Default::default()
+        };
+        let results = repository.query(filter).await.unwrap();
+
+        assert_eq!(results.len(), 1);
+        let pair = &results[0];
+
+        assert_eq!(pair.request.correlation_id, correlation_id as i64);
+        assert_eq!(pair.request.method, "POST");
+        assert_eq!(pair.request.uri, "/api/users");
+
+        // Check that body was parsed successfully
+        match &pair.request.body {
+            Some(Ok(parsed_body)) => {
+                assert_eq!(
+                    *parsed_body,
+                    TestRequest {
+                        user_id: 123,
+                        action: "create_user".to_string(),
+                    }
+                );
+            }
+            _ => panic!("Expected successfully parsed request body"),
+        }
+
+        // Headers should be converted to JSON properly
+        let headers_value = &pair.request.headers;
+        assert!(headers_value.get("content-type").is_some());
+        assert!(headers_value.get("user-agent").is_some());
+
+        // No response yet
+        assert!(pair.response.is_none());
+    }
+
+    #[sqlx::test]
+    async fn test_handle_response_with_typed_body(pool: PgPool) {
+        // Run migrations first
+        PostgresHandler::<TestRequest, TestResponse>::migrator()
+            .run(&pool)
+            .await
+            .unwrap();
+
+        let handler = PostgresHandler::<TestRequest, TestResponse>::from_pool(pool.clone())
+            .await
+            .unwrap();
+        let repository = handler.repository();
+
+        let request_data = create_test_request_data();
+        let response_data = create_test_response_data();
+        let correlation_id = 54321;
+
+        // Handle both request and response
+        handler.handle_request(request_data, correlation_id).await;
+        handler
+            .handle_response(response_data.clone(), correlation_id)
+            .await;
+
+        // Query back the complete pair
+        let filter = RequestFilter {
+            correlation_id: Some(correlation_id as i64),
+            ..Default::default()
+        };
+        let results = repository.query(filter).await.unwrap();
+
+        assert_eq!(results.len(), 1);
+        let pair = &results[0];
+
+        // Check response data
+        let response = pair.response.as_ref().expect("Response should be present");
+        assert_eq!(response.correlation_id, correlation_id as i64);
+        assert_eq!(response.status_code, 201);
+        assert_eq!(response.duration_ms, 150);
+
+        // Check that response body was parsed successfully
+        match &response.body {
+            Some(Ok(parsed_body)) => {
+                assert_eq!(
+                    *parsed_body,
+                    TestResponse {
+                        success: true,
+                        message: "User created successfully".to_string(),
+                    }
+                );
+            }
+            _ => panic!("Expected successfully parsed response body"),
+        }
+    }
+
+    #[sqlx::test]
+    async fn test_handle_unparseable_body_fallback(pool: PgPool) {
+        // Run migrations first
+        PostgresHandler::<TestRequest, TestResponse>::migrator()
+            .run(&pool)
+            .await
+            .unwrap();
+
+        let handler = PostgresHandler::<TestRequest, TestResponse>::from_pool(pool.clone())
+            .await
+            .unwrap();
+        let repository = handler.repository();
+
+        // Create request with invalid JSON for TestRequest
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), vec!["text/plain".into()]);
+
+        let invalid_json_body = b"not valid json for TestRequest";
+        let request_data = RequestData {
+            method: http::Method::POST,
+            uri: http::Uri::from_static("/api/test"),
+            headers,
+            body: Some(Bytes::from(invalid_json_body.to_vec())),
+            timestamp: SystemTime::now(),
+            correlation_id: 0,
+        };
+
+        let correlation_id = 99999;
+        handler.handle_request(request_data, correlation_id).await;
+
+        // Query back and verify fallback to base64
+        let filter = RequestFilter {
+            correlation_id: Some(correlation_id as i64),
+            ..Default::default()
+        };
+        let results = repository.query(filter).await.unwrap();
+
+        assert_eq!(results.len(), 1);
+        let pair = &results[0];
+
+        // Should fallback to raw bytes
+        match &pair.request.body {
+            Some(Err(raw_bytes)) => {
+                assert_eq!(raw_bytes.as_ref(), invalid_json_body);
+            }
+            _ => panic!("Expected raw bytes fallback for unparseable body"),
+        }
+    }
+
+    #[sqlx::test]
+    async fn test_query_with_multiple_filters(pool: PgPool) {
+        // Run migrations first
+        PostgresHandler::<Value, Value>::migrator()
+            .run(&pool)
+            .await
+            .unwrap();
+
+        let handler = PostgresHandler::<Value, Value>::from_pool(pool.clone())
+            .await
+            .unwrap();
+        let repository = handler.repository();
+
+        // Insert multiple requests with different characteristics
+        let test_cases = vec![
+            (1001, "GET", "/api/users", 200, 100),
+            (1002, "POST", "/api/users", 201, 150),
+            (1003, "GET", "/api/orders", 404, 50),
+            (1004, "PUT", "/api/users/123", 200, 300),
+        ];
+
+        for (correlation_id, method, uri, status, duration_ms) in test_cases {
+            let mut headers = HashMap::new();
+            headers.insert("content-type".to_string(), vec!["application/json".into()]);
+
+            let request_data = RequestData {
+                method: method.parse().unwrap(),
+                uri: uri.parse().unwrap(),
+                headers: headers.clone(),
+                body: Some(Bytes::from(b"{}".to_vec())),
+                timestamp: SystemTime::now(),
+                correlation_id: 0,
+            };
+
+            let response_data = ResponseData {
+                correlation_id: 0,
+                status: http::StatusCode::from_u16(status).unwrap(),
+                headers,
+                body: Some(Bytes::from(b"{}".to_vec())),
+                timestamp: SystemTime::now(),
+                duration: Duration::from_millis(duration_ms),
+            };
+
+            handler.handle_request(request_data, correlation_id).await;
+            handler.handle_response(response_data, correlation_id).await;
+        }
+
+        // Test method filter
+        let filter = RequestFilter {
+            method: Some("GET".to_string()),
+            ..Default::default()
+        };
+        let results = repository.query(filter).await.unwrap();
+        assert_eq!(results.len(), 2); // 1001, 1003
+
+        // Test status code filter
+        let filter = RequestFilter {
+            status_code: Some(200),
+            ..Default::default()
+        };
+        let results = repository.query(filter).await.unwrap();
+        assert_eq!(results.len(), 2); // 1001, 1004
+
+        // Test URI pattern filter
+        let filter = RequestFilter {
+            uri_pattern: Some("/api/users%".to_string()),
+            ..Default::default()
+        };
+        let results = repository.query(filter).await.unwrap();
+        assert_eq!(results.len(), 3); // 1001, 1002, 1004
+
+        // Test duration range filter
+        let filter = RequestFilter {
+            min_duration_ms: Some(100),
+            max_duration_ms: Some(200),
+            ..Default::default()
+        };
+        let results = repository.query(filter).await.unwrap();
+        assert_eq!(results.len(), 2); // 1001, 1002
+
+        // Test combined filters
+        let filter = RequestFilter {
+            method: Some("GET".to_string()),
+            status_code: Some(200),
+            ..Default::default()
+        };
+        let results = repository.query(filter).await.unwrap();
+        assert_eq!(results.len(), 1); // Only 1001
+        assert_eq!(results[0].request.correlation_id, 1001);
+    }
+
+    #[sqlx::test]
+    async fn test_query_with_pagination_and_ordering(pool: PgPool) {
+        // Run migrations first
+        PostgresHandler::<Value, Value>::migrator()
+            .run(&pool)
+            .await
+            .unwrap();
+
+        let handler = PostgresHandler::<Value, Value>::from_pool(pool.clone())
+            .await
+            .unwrap();
+        let repository = handler.repository();
+
+        // Insert requests with known timestamps
+        let now = SystemTime::now();
+        for i in 0..5 {
+            let correlation_id = 2000 + i;
+            let timestamp = now + Duration::from_secs(i * 10); // 10 second intervals
+
+            let mut headers = HashMap::new();
+            headers.insert("x-test-id".to_string(), vec![i.to_string().into()]);
+
+            let request_data = RequestData {
+                method: http::Method::GET,
+                uri: "/api/test".parse().unwrap(),
+                headers,
+                body: Some(Bytes::from(format!("{{\"id\": {}}}", i).into_bytes())),
+                timestamp,
+                correlation_id: 0,
+            };
+
+            handler.handle_request(request_data, correlation_id).await;
+        }
+
+        // Test default ordering (ASC) with limit
+        let filter = RequestFilter {
+            limit: Some(3),
+            ..Default::default()
+        };
+        let results = repository.query(filter).await.unwrap();
+        assert_eq!(results.len(), 3);
+
+        // Should be in ascending timestamp order
+        for i in 0..2 {
+            assert!(results[i].request.timestamp <= results[i + 1].request.timestamp);
+        }
+
+        // Test descending order with offset
+        let filter = RequestFilter {
+            order_by_timestamp_desc: true,
+            limit: Some(2),
+            offset: Some(1),
+            ..Default::default()
+        };
+        let results = repository.query(filter).await.unwrap();
+        assert_eq!(results.len(), 2);
+
+        // Should be in descending order, skipping the first (newest) one
+        assert!(results[0].request.timestamp >= results[1].request.timestamp);
+    }
+
+    #[sqlx::test]
+    async fn test_headers_conversion(pool: PgPool) {
+        // Run migrations first
+        PostgresHandler::<Value, Value>::migrator()
+            .run(&pool)
+            .await
+            .unwrap();
+
+        let handler = PostgresHandler::<Value, Value>::from_pool(pool.clone())
+            .await
+            .unwrap();
+        let repository = handler.repository();
+
+        // Test various header scenarios
+        let mut headers = HashMap::new();
+        headers.insert("single-value".to_string(), vec!["test".into()]);
+        headers.insert(
+            "multi-value".to_string(),
+            vec!["val1".into(), "val2".into()],
+        );
+        headers.insert("empty-value".to_string(), vec!["".into()]);
+
+        let request_data = RequestData {
+            correlation_id: 0,
+            method: http::Method::GET,
+            uri: "/test".parse().unwrap(),
+            headers,
+            body: None,
+            timestamp: SystemTime::now(),
+        };
+
+        let correlation_id = 3000;
+        handler.handle_request(request_data, correlation_id).await;
+
+        let filter = RequestFilter {
+            correlation_id: Some(correlation_id as i64),
+            ..Default::default()
+        };
+        let results = repository.query(filter).await.unwrap();
+
+        assert_eq!(results.len(), 1);
+        let headers_json = &results[0].request.headers;
+
+        // Single value should be stored as string
+        assert_eq!(
+            headers_json["single-value"],
+            Value::String("test".to_string())
+        );
+
+        // Multi-value should be stored as array
+        match &headers_json["multi-value"] {
+            Value::Array(arr) => {
+                assert_eq!(arr.len(), 2);
+                assert_eq!(arr[0], Value::String("val1".to_string()));
+                assert_eq!(arr[1], Value::String("val2".to_string()));
+            }
+            _ => panic!("Expected array for multi-value header"),
+        }
+
+        // Empty value should still be a string
+        assert_eq!(headers_json["empty-value"], Value::String("".to_string()));
+    }
+
+    #[sqlx::test]
+    async fn test_timestamp_filtering(pool: PgPool) {
+        // Run migrations first
+        PostgresHandler::<Value, Value>::migrator()
+            .run(&pool)
+            .await
+            .unwrap();
+
+        let handler = PostgresHandler::<Value, Value>::from_pool(pool.clone())
+            .await
+            .unwrap();
+        let repository = handler.repository();
+
+        let base_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_000); // Sept 2020
+
+        // Insert requests at different times
+        let times = vec![
+            base_time + Duration::from_secs(0),    // correlation_id 4001
+            base_time + Duration::from_secs(3600), // correlation_id 4002 (1 hour later)
+            base_time + Duration::from_secs(7200), // correlation_id 4003 (2 hours later)
+        ];
+
+        for (i, timestamp) in times.iter().enumerate() {
+            let correlation_id = 4001 + i as u64;
+            let request_data = RequestData {
+                method: http::Method::GET,
+                uri: "/test".parse().unwrap(),
+                headers: HashMap::new(),
+                body: None,
+                timestamp: *timestamp,
+                correlation_id: 0,
+            };
+
+            handler.handle_request(request_data, correlation_id).await;
+        }
+
+        // Test timestamp_after filter
+        let after_time: DateTime<Utc> = (base_time + Duration::from_secs(1800)).into(); // 30 min after first
+        let filter = RequestFilter {
+            timestamp_after: Some(after_time),
+            ..Default::default()
+        };
+        let results = repository.query(filter).await.unwrap();
+        assert_eq!(results.len(), 2); // Should get 4002 and 4003
+
+        // Test timestamp_before filter
+        let before_time: DateTime<Utc> = (base_time + Duration::from_secs(5400)).into(); // 1.5 hours after first
+        let filter = RequestFilter {
+            timestamp_before: Some(before_time),
+            ..Default::default()
+        };
+        let results = repository.query(filter).await.unwrap();
+        assert_eq!(results.len(), 2); // Should get 4001 and 4002
+
+        // Test timestamp range
+        let filter = RequestFilter {
+            timestamp_after: Some(after_time),
+            timestamp_before: Some(before_time),
+            ..Default::default()
+        };
+        let results = repository.query(filter).await.unwrap();
+        assert_eq!(results.len(), 1); // Should get only 4002
+        assert_eq!(results[0].request.correlation_id, 4002);
     }
 }
