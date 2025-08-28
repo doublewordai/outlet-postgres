@@ -5,6 +5,8 @@ PostgreSQL logging handler for the
 middleware. This crate implements the `RequestHandler` trait from outlet to log
 HTTP requests and responses to PostgreSQL with JSONB serialization for bodies.
 
+Features high-performance async logging with automatic table creation and structured query support.
+
 ## Quick Start
 
 Add this to your `Cargo.toml`:
