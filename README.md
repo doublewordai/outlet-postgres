@@ -5,8 +5,10 @@ PostgreSQL logging handler for the [outlet](../outlet) HTTP request/response mid
 ## Features
 
 - **PostgreSQL Integration**: Uses sqlx for async PostgreSQL operations
+- **Type-Safe Querying**: Query logged data with typed request/response bodies
 - **JSONB Bodies**: Serializes request/response bodies to JSONB fields
-- **Smart Body Handling**: JSON bodies are stored as JSON, text as strings, binary as base64
+- **Smart Body Handling**: Attempts typed parsing first, falls back to base64 encoding
+- **Dual-Type Support**: Separate types for request and response bodies
 - **Correlation**: Links requests and responses via correlation IDs
 - **Automatic Schema**: Creates necessary tables and indexes automatically
 - **Error Handling**: Graceful error handling with tracing integration

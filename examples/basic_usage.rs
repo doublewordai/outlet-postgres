@@ -82,11 +82,9 @@ async fn dump_responses(
     let offset = (page - 1) * limit;
 
     // Get total count for pagination metadata
-    let total_count = sqlx::query!(
-        "SELECT COUNT(*) as count FROM http_requests"
-    )
-    .fetch_one(&pool)
-    .await;
+    let total_count = sqlx::query!("SELECT COUNT(*) as count FROM http_requests")
+        .fetch_one(&pool)
+        .await;
 
     let total_count = match total_count {
         Ok(row) => row.count.unwrap_or(0) as u32,
@@ -136,7 +134,7 @@ async fn dump_responses(
                             "body": row.response_body,
                             "duration_ms": row.duration_ms
                         }),
-                        None => Value::Null
+                        None => Value::Null,
                     };
 
                     json!({

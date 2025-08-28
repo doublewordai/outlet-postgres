@@ -22,13 +22,13 @@
 //! use serde::{Deserialize, Serialize};
 //!
 //! // Define your custom request and response body types
-//! #[derive(Deserialize, Serialize)]
+//! #[derive(Clone, Debug, Deserialize, Serialize)]
 //! struct ApiRequest {
 //!     user_id: u64,
 //!     action: String,
 //! }
 //!
-//! #[derive(Deserialize, Serialize)]
+//! #[derive(Clone, Debug, Deserialize, Serialize)]
 //! struct ApiResponse {
 //!     success: bool,
 //!     message: String,
@@ -90,6 +90,7 @@
 //! }
 //! ```
 
+use base64::Engine;
 use chrono::{DateTime, Utc};
 use outlet::{RequestData, RequestHandler, ResponseData};
 use serde::{Deserialize, Serialize};
@@ -97,12 +98,13 @@ use serde_json::Value;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use tracing::{debug, error, instrument};
-use base64::Engine;
 
 pub mod error;
 pub mod repository;
 pub use error::PostgresHandlerError;
-pub use repository::{HttpRequest, HttpResponse, RequestRepository, RequestResponsePair, RequestFilter};
+pub use repository::{
+    HttpRequest, HttpResponse, RequestFilter, RequestRepository, RequestResponsePair,
+};
 
 /// PostgreSQL handler for outlet middleware.
 ///
@@ -250,7 +252,7 @@ where
                 return (json_value, true);
             }
         }
-        
+
         // If deserialization fails, store as base64-encoded string
         let base64_string = base64::engine::general_purpose::STANDARD.encode(body);
         (Value::String(base64_string), false)
@@ -265,14 +267,14 @@ where
                 return (json_value, true);
             }
         }
-        
+
         // If deserialization fails, store as base64-encoded string
         let base64_string = base64::engine::general_purpose::STANDARD.encode(body);
         (Value::String(base64_string), false)
     }
 
     /// Get a repository for querying logged requests and responses.
-    /// 
+    ///
     /// Returns a `RequestRepository` with the same type parameters as this handler,
     /// allowing for type-safe querying of request and response bodies.
     pub fn repository(&self) -> crate::repository::RequestRepository<TReq, TRes> {
@@ -288,7 +290,9 @@ where
     #[instrument(skip(self, data), fields(correlation_id = %correlation_id))]
     async fn handle_request(&self, data: RequestData, correlation_id: u64) {
         let headers_json = Self::headers_to_json(&data.headers);
-        let (body_json, parsed) = data.body.as_ref()
+        let (body_json, parsed) = data
+            .body
+            .as_ref()
             .map(|b| {
                 let (json, parsed) = Self::request_body_to_json_with_fallback(b);
                 (Some(json), parsed)
@@ -323,7 +327,9 @@ where
     #[instrument(skip(self, data), fields(correlation_id = %correlation_id))]
     async fn handle_response(&self, data: ResponseData, correlation_id: u64) {
         let headers_json = Self::headers_to_json(&data.headers);
-        let (body_json, parsed) = data.body.as_ref()
+        let (body_json, parsed) = data
+            .body
+            .as_ref()
             .map(|b| {
                 let (json, parsed) = Self::response_body_to_json_with_fallback(b);
                 (Some(json), parsed)

@@ -1,13 +1,13 @@
-use outlet::{RequestLoggerLayer, RequestLoggerConfig};
-use outlet_postgres::{PostgresHandler, RequestFilter, RequestRepository};
 use axum::{
-    routing::{get, post}, 
-    Router, Json, 
+    extract::{Query, State},
     http::StatusCode,
-    extract::{State, Query}
+    routing::{get, post},
+    Json, Router,
 };
-use tower::ServiceBuilder;
+use outlet::{RequestLoggerConfig, RequestLoggerLayer};
+use outlet_postgres::{PostgresHandler, RequestFilter, RequestRepository};
 use serde::{Deserialize, Serialize};
+use tower::ServiceBuilder;
 
 // Define your API request and response types
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -40,7 +40,9 @@ enum ApiResponse {
 }
 
 // Your API handler
-async fn create_user(Json(payload): Json<CreateUserRequest>) -> Result<Json<CreateUserResponse>, (StatusCode, Json<ErrorResponse>)> {
+async fn create_user(
+    Json(payload): Json<CreateUserRequest>,
+) -> Result<Json<CreateUserResponse>, (StatusCode, Json<ErrorResponse>)> {
     // Simulate some business logic
     if payload.age < 18 {
         return Err((
@@ -48,17 +50,17 @@ async fn create_user(Json(payload): Json<CreateUserRequest>) -> Result<Json<Crea
             Json(ErrorResponse {
                 error: "User must be 18 or older".to_string(),
                 code: 1001,
-            })
+            }),
         ));
     }
-    
+
     if payload.username.len() < 3 {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
                 error: "Username must be at least 3 characters".to_string(),
                 code: 1002,
-            })
+            }),
         ));
     }
 
@@ -130,33 +132,36 @@ async fn get_requests(
 
     match state.repository.query(filter).await {
         Ok(pairs) => {
-            let requests: Vec<RequestSummary> = pairs.into_iter().map(|pair| {
-                let (request_body, request_parsed) = match pair.request.body {
-                    Some(Ok(body)) => (Some(body), true),
-                    _ => (None, false),
-                };
+            let requests: Vec<RequestSummary> = pairs
+                .into_iter()
+                .map(|pair| {
+                    let (request_body, request_parsed) = match pair.request.body {
+                        Some(Ok(body)) => (Some(body), true),
+                        _ => (None, false),
+                    };
 
-                let (response_body, response_parsed) = match pair.response.as_ref()
-                    .and_then(|r| r.body.as_ref()) {
-                    Some(Ok(body)) => (Some(body.clone()), true),
-                    _ => (None, false),
-                };
+                    let (response_body, response_parsed) =
+                        match pair.response.as_ref().and_then(|r| r.body.as_ref()) {
+                            Some(Ok(body)) => (Some(body.clone()), true),
+                            _ => (None, false),
+                        };
 
-                RequestSummary {
-                    correlation_id: pair.request.correlation_id,
-                    method: pair.request.method,
-                    uri: pair.request.uri,
-                    timestamp: pair.request.timestamp.to_rfc3339(),
-                    status_code: pair.response.as_ref().map(|r| r.status_code),
-                    duration_ms: pair.response.as_ref().map(|r| r.duration_ms),
-                    request_body,
-                    response_body,
-                    parsing_info: ParsingInfo {
-                        request_parsed,
-                        response_parsed,
-                    },
-                }
-            }).collect();
+                    RequestSummary {
+                        correlation_id: pair.request.correlation_id,
+                        method: pair.request.method,
+                        uri: pair.request.uri,
+                        timestamp: pair.request.timestamp.to_rfc3339(),
+                        status_code: pair.response.as_ref().map(|r| r.status_code),
+                        duration_ms: pair.response.as_ref().map(|r| r.duration_ms),
+                        request_body,
+                        response_body,
+                        parsing_info: ParsingInfo {
+                            request_parsed,
+                            response_parsed,
+                        },
+                    }
+                })
+                .collect();
 
             Ok(Json(RequestAnalytics {
                 total_requests: requests.len(),
@@ -183,7 +188,8 @@ async fn get_errors(
 
     match state.repository.query(filter).await {
         Ok(pairs) => {
-            let requests: Vec<RequestSummary> = pairs.into_iter()
+            let requests: Vec<RequestSummary> = pairs
+                .into_iter()
                 .filter(|pair| pair.response.is_some())
                 .map(|pair| {
                     let (request_body, request_parsed) = match pair.request.body {
@@ -191,11 +197,11 @@ async fn get_errors(
                         _ => (None, false),
                     };
 
-                    let (response_body, response_parsed) = match pair.response.as_ref()
-                        .and_then(|r| r.body.as_ref()) {
-                        Some(Ok(body)) => (Some(body.clone()), true),
-                        _ => (None, false),
-                    };
+                    let (response_body, response_parsed) =
+                        match pair.response.as_ref().and_then(|r| r.body.as_ref()) {
+                            Some(Ok(body)) => (Some(body.clone()), true),
+                            _ => (None, false),
+                        };
 
                     RequestSummary {
                         correlation_id: pair.request.correlation_id,
@@ -211,7 +217,8 @@ async fn get_errors(
                             response_parsed,
                         },
                     }
-                }).collect();
+                })
+                .collect();
 
             Ok(Json(RequestAnalytics {
                 total_requests: requests.len(),
@@ -237,7 +244,8 @@ async fn get_slow_requests(
 
     match state.repository.query(filter).await {
         Ok(pairs) => {
-            let requests: Vec<RequestSummary> = pairs.into_iter()
+            let requests: Vec<RequestSummary> = pairs
+                .into_iter()
                 .filter(|pair| pair.response.is_some())
                 .map(|pair| {
                     let (request_body, request_parsed) = match pair.request.body {
@@ -245,11 +253,11 @@ async fn get_slow_requests(
                         _ => (None, false),
                     };
 
-                    let (response_body, response_parsed) = match pair.response.as_ref()
-                        .and_then(|r| r.body.as_ref()) {
-                        Some(Ok(body)) => (Some(body.clone()), true),
-                        _ => (None, false),
-                    };
+                    let (response_body, response_parsed) =
+                        match pair.response.as_ref().and_then(|r| r.body.as_ref()) {
+                            Some(Ok(body)) => (Some(body.clone()), true),
+                            _ => (None, false),
+                        };
 
                     RequestSummary {
                         correlation_id: pair.request.correlation_id,
@@ -265,7 +273,8 @@ async fn get_slow_requests(
                             response_parsed,
                         },
                     }
-                }).collect();
+                })
+                .collect();
 
             Ok(Json(RequestAnalytics {
                 total_requests: requests.len(),
@@ -279,20 +288,21 @@ async fn get_slow_requests(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
-    
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://postgres:password@localhost:5432/outlet_demo".to_string());
-    
+
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        "postgresql://postgres:password@localhost:5432/outlet_demo".to_string()
+    });
+
     println!("Connecting to database: {}", database_url);
-    
+
     // Create handler with typed request and response bodies
     // ApiResponse uses serde untagged enum to handle both CreateUserResponse and ErrorResponse
     let handler = PostgresHandler::<CreateUserRequest, ApiResponse>::new(&database_url).await?;
-    
+
     // Get the repository from the handler and store it in app state
     let repository = handler.repository();
     let app_state = AppState { repository };
-    
+
     let layer = RequestLoggerLayer::new(RequestLoggerConfig::default(), handler);
 
     let app = Router::new()
@@ -300,7 +310,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/users", post(create_user))
         // Analytics routes - these use the repository to query logged data
         .route("/analytics/requests", get(get_requests))
-        .route("/analytics/errors", get(get_errors))  
+        .route("/analytics/errors", get(get_errors))
         .route("/analytics/slow", get(get_slow_requests))
         .with_state(app_state)
         .layer(ServiceBuilder::new().layer(layer));
@@ -318,7 +328,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     println!("📈 Then query the analytics endpoints:");
     println!("  curl 'http://localhost:3000/analytics/requests?limit=5'");
-    println!("  curl 'http://localhost:3000/analytics/errors?limit=3'");  
+    println!("  curl 'http://localhost:3000/analytics/errors?limit=3'");
     println!("  curl 'http://localhost:3000/analytics/slow?min_duration=10&limit=3'");
     println!("  curl 'http://localhost:3000/analytics/requests?method=POST&limit=10'");
     println!();
@@ -331,6 +341,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
     axum::serve(listener, app).await?;
-    
+
     Ok(())
 }

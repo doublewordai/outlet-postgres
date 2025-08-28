@@ -1,10 +1,10 @@
+use base64::Engine;
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use serde::de::Error;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{FromRow, PgPool, QueryBuilder, Row};
-use bytes::Bytes;
-use base64::Engine;
-use serde::de::Error;
 
 use crate::error::PostgresHandlerError;
 
@@ -102,8 +102,10 @@ where
         }
     }
 
-
-    pub async fn query(&self, filter: RequestFilter) -> Result<Vec<RequestResponsePair<TReq, TRes>>, PostgresHandlerError> {
+    pub async fn query(
+        &self,
+        filter: RequestFilter,
+    ) -> Result<Vec<RequestResponsePair<TReq, TRes>>, PostgresHandlerError> {
         let mut query = QueryBuilder::new(
             r#"
             SELECT 
@@ -113,7 +115,7 @@ where
                 res.status_code, res.headers as res_headers, res.body as res_body, res.body_parsed as res_body_parsed, res.duration_ms, res.created_at as res_created_at
             FROM http_requests r
             LEFT JOIN http_responses res ON r.correlation_id = res.correlation_id
-            "#
+            "#,
         );
 
         let mut where_added = false;
@@ -248,8 +250,10 @@ where
         let mut pairs = Vec::new();
         for row in rows {
             let req_body = row.try_get::<Option<Value>, _>("req_body").unwrap_or(None);
-            let req_body_parsed = row.try_get::<Option<bool>, _>("req_body_parsed").unwrap_or(Some(false));
-            
+            let req_body_parsed = row
+                .try_get::<Option<bool>, _>("req_body_parsed")
+                .unwrap_or(Some(false));
+
             let request_body = match req_body {
                 Some(json_value) => {
                     if req_body_parsed == Some(true) {
@@ -259,11 +263,18 @@ where
                     } else {
                         // Body is stored as base64 string, decode it
                         if let Value::String(base64_str) = json_value {
-                            let decoded_bytes = base64::engine::general_purpose::STANDARD.decode(&base64_str)
-                                .map_err(|_| PostgresHandlerError::Json(Error::custom("Failed to decode base64")))?;
+                            let decoded_bytes = base64::engine::general_purpose::STANDARD
+                                .decode(&base64_str)
+                                .map_err(|_| {
+                                    PostgresHandlerError::Json(Error::custom(
+                                        "Failed to decode base64",
+                                    ))
+                                })?;
                             Some(Err(Bytes::from(decoded_bytes)))
                         } else {
-                            return Err(PostgresHandlerError::Json(Error::custom("Invalid body format")));
+                            return Err(PostgresHandlerError::Json(Error::custom(
+                                "Invalid body format",
+                            )));
                         }
                     }
                 }
@@ -282,41 +293,53 @@ where
             };
 
             let response = if let Ok(res_id) = row.try_get::<Option<i64>, _>("res_id") {
-                res_id.map(|_| -> Result<HttpResponse<TRes>, PostgresHandlerError> {
-                    let res_body = row.try_get::<Option<Value>, _>("res_body").unwrap_or(None);
-                    let res_body_parsed = row.try_get::<Option<bool>, _>("res_body_parsed").unwrap_or(Some(false));
-                    
-                    let response_body = match res_body {
-                        Some(json_value) => {
-                            if res_body_parsed == Some(true) {
-                                // Body was successfully parsed as TRes when stored
-                                Some(Ok(serde_json::from_value::<TRes>(json_value)
-                                    .map_err(PostgresHandlerError::Json)?))
-                            } else {
-                                // Body is stored as base64 string, decode it
-                                if let Value::String(base64_str) = json_value {
-                                    let decoded_bytes = base64::engine::general_purpose::STANDARD.decode(&base64_str)
-                                        .map_err(|_| PostgresHandlerError::Json(Error::custom("Failed to decode base64")))?;
-                                    Some(Err(Bytes::from(decoded_bytes)))
+                res_id
+                    .map(|_| -> Result<HttpResponse<TRes>, PostgresHandlerError> {
+                        let res_body = row.try_get::<Option<Value>, _>("res_body").unwrap_or(None);
+                        let res_body_parsed = row
+                            .try_get::<Option<bool>, _>("res_body_parsed")
+                            .unwrap_or(Some(false));
+
+                        let response_body = match res_body {
+                            Some(json_value) => {
+                                if res_body_parsed == Some(true) {
+                                    // Body was successfully parsed as TRes when stored
+                                    Some(Ok(serde_json::from_value::<TRes>(json_value)
+                                        .map_err(PostgresHandlerError::Json)?))
                                 } else {
-                                    return Err(PostgresHandlerError::Json(Error::custom("Invalid body format")));
+                                    // Body is stored as base64 string, decode it
+                                    if let Value::String(base64_str) = json_value {
+                                        let decoded_bytes =
+                                            base64::engine::general_purpose::STANDARD
+                                                .decode(&base64_str)
+                                                .map_err(|_| {
+                                                    PostgresHandlerError::Json(Error::custom(
+                                                        "Failed to decode base64",
+                                                    ))
+                                                })?;
+                                        Some(Err(Bytes::from(decoded_bytes)))
+                                    } else {
+                                        return Err(PostgresHandlerError::Json(Error::custom(
+                                            "Invalid body format",
+                                        )));
+                                    }
                                 }
                             }
-                        }
-                        None => None,
-                    };
+                            None => None,
+                        };
 
-                    Ok(HttpResponse {
-                        id: row.get("res_id"),
-                        correlation_id: row.get("res_correlation_id"),
-                        timestamp: row.get("res_timestamp"),
-                        status_code: row.get("status_code"),
-                        headers: row.get("res_headers"),
-                        body: response_body,
-                        duration_ms: row.get("duration_ms"),
-                        created_at: row.get("res_created_at"),
+                        Ok(HttpResponse {
+                            id: row.get("res_id"),
+                            correlation_id: row.get("res_correlation_id"),
+                            timestamp: row.get("res_timestamp"),
+                            status_code: row.get("status_code"),
+                            headers: row.get("res_headers"),
+                            body: response_body,
+                            duration_ms: row.get("duration_ms"),
+                            created_at: row.get("res_created_at"),
+                        })
                     })
-                }).transpose()?
+                    .transpose()?
             } else {
                 None
             };
