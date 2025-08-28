@@ -1,17 +1,9 @@
 # outlet-postgres
 
-PostgreSQL logging handler for the [outlet](https://github.com/doublewordai/outlet) HTTP request/response middleware. This crate implements the `RequestHandler` trait from outlet to log HTTP requests and responses to PostgreSQL with JSONB serialization for bodies.
-
-## Features
-
-- **PostgreSQL Integration**: Uses sqlx for async PostgreSQL operations
-- **Type-Safe Querying**: Query logged data with typed request/response bodies
-- **JSONB Bodies**: Serializes request/response bodies to JSONB fields
-- **Smart Body Handling**: Attempts typed parsing first, falls back to base64 encoding
-- **Dual-Type Support**: Separate types for request and response bodies
-- **Correlation**: Links requests and responses via correlation IDs
-- **Automatic Schema**: Creates necessary tables and indexes automatically
-- **Error Handling**: Graceful error handling with tracing integration
+PostgreSQL logging handler for the
+[outlet](https://github.com/doublewordai/outlet) HTTP request/response
+middleware. This crate implements the `RequestHandler` trait from outlet to log
+HTTP requests and responses to PostgreSQL with JSONB serialization for bodies.
 
 ## Quick Start
 
@@ -67,6 +59,7 @@ The handler automatically creates two tables:
 - `uri` - Full request URI
 - `headers` - Request headers as JSONB
 - `body` - Request body as JSONB (optional)
+- `body_parsed` - Whether the body was parsed as the supplied JSON-serde type (default `serde_json::Value`) or not. If not, the `body` field is the base64-encoded binary data.
 - `created_at` - When the record was inserted
 
 ### `http_responses`
@@ -77,15 +70,9 @@ The handler automatically creates two tables:
 - `status_code` - HTTP status code
 - `headers` - Response headers as JSONB
 - `body` - Response body as JSONB (optional)
+- `body_parsed` - Whether the body was parsed as the supplied JSON-serde type (default `serde_json::Value`) or not. If not, the `body` field is the base64-encoded binary data.
 - `duration_ms` - Request processing time in milliseconds
 - `created_at` - When the record was inserted
-
-## Body Serialization
-
-Request and response bodies are intelligently serialized to JSONB:
-
-1. **JSON Content**: If the body is valid JSON, matching the type supplied to the `new` constructor, it's stored as a JSON object/array
-3. **Binary Content**: Binary data is base64-encoded and stored as a JSON string
 
 ## Configuration
 
@@ -170,17 +157,6 @@ ORDER BY request_count DESC;
    curl -X POST http://localhost:3000/users -H "Content-Type: application/json" -d '{"name":"Alice","email":"alice@example.com"}'
    curl http://localhost:3000/large
    ```
-
-## Error Handling
-
-The handler logs errors but doesn't fail the request processing. If database operations fail, errors are logged via the `tracing` crate but the HTTP request continues normally.
-
-## Performance Considerations
-
-- Database operations happen asynchronously in background tasks
-- Connection pooling is handled by sqlx
-- Indexes are automatically created on correlation_id columns
-- Consider setting up database retention policies for long-running applications
 
 ## License
 
