@@ -1,6 +1,6 @@
 # outlet-postgres
 
-PostgreSQL logging handler for the [outlet](../outlet) HTTP request/response middleware. This crate implements the `RequestHandler` trait from outlet to log HTTP requests and responses to PostgreSQL with JSONB serialization for bodies.
+PostgreSQL logging handler for the [outlet](https://github.com/doublewordai/outlet) HTTP request/response middleware. This crate implements the `RequestHandler` trait from outlet to log HTTP requests and responses to PostgreSQL with JSONB serialization for bodies.
 
 ## Features
 
@@ -185,4 +185,3 @@ The handler logs errors but doesn't fail the request processing. If database ope
 ## License
 
 MIT
-
