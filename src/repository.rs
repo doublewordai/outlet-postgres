@@ -4,35 +4,9 @@ use chrono::{DateTime, Utc};
 use serde::de::Error;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{FromRow, PgPool, QueryBuilder, Row};
+use sqlx::{PgPool, QueryBuilder, Row};
 
 use crate::error::PostgresHandlerError;
-
-#[derive(Debug, FromRow)]
-struct HttpRequestRow {
-    pub id: i64,
-    pub correlation_id: i64,
-    pub timestamp: DateTime<Utc>,
-    pub method: String,
-    pub uri: String,
-    pub headers: Value,
-    pub body: Option<Value>,
-    pub body_parsed: Option<bool>,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, FromRow)]
-struct HttpResponseRow {
-    pub id: i64,
-    pub correlation_id: i64,
-    pub timestamp: DateTime<Utc>,
-    pub status_code: i32,
-    pub headers: Value,
-    pub body: Option<Value>,
-    pub body_parsed: Option<bool>,
-    pub duration_ms: i64,
-    pub created_at: DateTime<Utc>,
-}
 
 #[derive(Debug)]
 pub struct HttpRequest<TReq> {
@@ -219,7 +193,6 @@ where
                 query.push(" AND ");
             } else {
                 query.push(" WHERE ");
-                where_added = true;
             }
             query.push("res.duration_ms <= ");
             query.push_bind(max_duration);
@@ -348,23 +321,5 @@ where
         }
 
         Ok(pairs)
-    }
-
-    pub async fn count_requests(&self) -> Result<i64, PostgresHandlerError> {
-        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM http_requests")
-            .fetch_one(&self.pool)
-            .await
-            .map_err(PostgresHandlerError::Query)?;
-
-        Ok(count.0)
-    }
-
-    pub async fn count_responses(&self) -> Result<i64, PostgresHandlerError> {
-        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM http_responses")
-            .fetch_one(&self.pool)
-            .await
-            .map_err(PostgresHandlerError::Query)?;
-
-        Ok(count.0)
     }
 }
