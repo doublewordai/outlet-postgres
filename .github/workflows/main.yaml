@@ -39,6 +39,8 @@ jobs:
         uses: cargo-bins/cargo-binstall@main
 
       - name: Install sqlx-cli
+        env:
+          RUSTC_WRAPPER: "sccache"
         run: cargo binstall sqlx-cli --no-confirm
 
       - name: Run database migrations

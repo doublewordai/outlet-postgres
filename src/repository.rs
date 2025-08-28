@@ -57,7 +57,7 @@ pub struct RequestFilter {
 }
 
 impl RequestFilter {
-    pub fn build_query(&self) -> QueryBuilder<sqlx::Postgres> {
+    pub fn build_query(&self) -> QueryBuilder<'_, sqlx::Postgres> {
         let mut query = QueryBuilder::new(
             r#"
             SELECT 
