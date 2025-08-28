@@ -82,41 +82,54 @@ async fn dump_responses(
     let offset = (page - 1) * limit;
 
     // Get total count for pagination metadata
-    let total_count = sqlx::query!("SELECT COUNT(*) as count FROM http_requests")
+    let total_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM http_requests")
         .fetch_one(&pool)
-        .await;
-
-    let total_count = match total_count {
-        Ok(row) => row.count.unwrap_or(0) as u32,
-        Err(_) => 0,
-    };
+        .await
+        .unwrap_or(0) as u32;
 
     let total_pages = (total_count + limit - 1) / limit;
 
-    let pairs = sqlx::query!(
+    let pairs = sqlx::query_as::<
+        _,
+        (
+            uuid::Uuid,
+            uuid::Uuid,
+            chrono::DateTime<chrono::Utc>,
+            String,
+            String,
+            serde_json::Value,
+            serde_json::Value,
+            Option<uuid::Uuid>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<i16>,
+            Option<serde_json::Value>,
+            Option<serde_json::Value>,
+            Option<i32>,
+        ),
+    >(
         r#"
         SELECT 
-            req.id as request_id,
+            req.id,
             req.correlation_id,
-            req.timestamp as request_timestamp,
+            req.timestamp,
             req.method,
             req.uri,
-            req.headers as request_headers,
-            req.body as request_body,
-            resp.id as "response_id?",
-            resp.timestamp as "response_timestamp?",
-            resp.status_code as "status_code?",
-            resp.headers as "response_headers?",
-            resp.body as "response_body?",
-            resp.duration_ms as "duration_ms?"
+            req.headers,
+            req.body,
+            resp.id,
+            resp.timestamp,
+            resp.status_code,
+            resp.headers,
+            resp.body,
+            resp.duration_ms
         FROM http_requests req
         LEFT JOIN http_responses resp ON req.correlation_id = resp.correlation_id
         ORDER BY req.timestamp DESC
         LIMIT $1 OFFSET $2
         "#,
-        limit as i64,
-        offset as i64
     )
+    .bind(limit as i64)
+    .bind(offset as i64)
     .fetch_all(&pool)
     .await;
 
@@ -125,27 +138,42 @@ async fn dump_responses(
             let pairs: Vec<Value> = rows
                 .into_iter()
                 .map(|row| {
-                    let response = match row.response_id {
+                    let (
+                        request_id,
+                        correlation_id,
+                        request_timestamp,
+                        method,
+                        uri,
+                        request_headers,
+                        request_body,
+                        response_id,
+                        response_timestamp,
+                        status_code,
+                        response_headers,
+                        response_body,
+                        duration_ms,
+                    ) = row;
+                    let response = match response_id {
                         Some(response_id) => json!({
                             "id": response_id,
-                            "timestamp": row.response_timestamp,
-                            "status_code": row.status_code,
-                            "headers": row.response_headers,
-                            "body": row.response_body,
-                            "duration_ms": row.duration_ms
+                            "timestamp": response_timestamp,
+                            "status_code": status_code,
+                            "headers": response_headers,
+                            "body": response_body,
+                            "duration_ms": duration_ms
                         }),
                         None => Value::Null,
                     };
 
                     json!({
-                        "correlation_id": row.correlation_id,
+                        "correlation_id": correlation_id,
                         "request": {
-                            "id": row.request_id,
-                            "timestamp": row.request_timestamp,
-                            "method": row.method,
-                            "uri": row.uri,
-                            "headers": row.request_headers,
-                            "body": row.request_body
+                            "id": request_id,
+                            "timestamp": request_timestamp,
+                            "method": method,
+                            "uri": uri,
+                            "headers": request_headers,
+                            "body": request_body
                         },
                         "response": response
                     })
