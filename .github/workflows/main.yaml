@@ -9,6 +9,22 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -16,11 +32,29 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.7
+
+      - name: Install sqlx-cli
+        env:
+          RUSTC_WRAPPER: "sccache"
+        run: cargo install sqlx-cli --no-default-features --features rustls,postgres
+
+      - name: Run database migrations
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/test
+        run: sqlx migrate run
+
       - name: Run Tests
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/test
+          RUSTC_WRAPPER: "sccache"
         run: cargo test --verbose
 
       - name: Check formatting
         run: cargo fmt --check
 
       - name: Run Clippy
+        env:
+          RUSTC_WRAPPER: "sccache"
         run: cargo clippy -- -D warnings
