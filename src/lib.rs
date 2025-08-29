@@ -90,13 +90,13 @@
 //! }
 //! ```
 
-use base64::Engine;
 use chrono::{DateTime, Utc};
 use outlet::{RequestData, RequestHandler, ResponseData};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::PgPool;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tracing::{debug, error, instrument};
 
 pub mod error;
@@ -105,6 +105,35 @@ pub use error::PostgresHandlerError;
 pub use repository::{
     HttpRequest, HttpResponse, RequestFilter, RequestRepository, RequestResponsePair,
 };
+
+/// Get the migrator for running outlet-postgres database migrations.
+///
+/// This returns a SQLx migrator that can be used to set up the required
+/// `http_requests` and `http_responses` tables. The consuming application
+/// is responsible for running these migrations at the appropriate time
+/// and in the appropriate database schema.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use outlet_postgres::migrator;
+/// use sqlx::PgPool;
+///
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let pool = PgPool::connect("postgresql://user:pass@localhost/db").await?;
+///     
+///     // Run outlet migrations
+///     migrator().run(&pool).await?;
+///     
+///     Ok(())
+/// }
+/// ```
+pub fn migrator() -> sqlx::migrate::Migrator {
+    sqlx::migrate!("./migrations")
+}
+
+type Serializer<T> = Arc<dyn Fn(&[u8]) -> Result<T, String> + Send + Sync>;
 
 /// PostgreSQL handler for outlet middleware.
 ///
@@ -121,8 +150,8 @@ where
     TRes: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'static,
 {
     pool: PgPool,
-    _phantom_req: std::marker::PhantomData<TReq>,
-    _phantom_res: std::marker::PhantomData<TRes>,
+    request_serializer: Serializer<TReq>,
+    response_serializer: Serializer<TRes>,
 }
 
 impl<TReq, TRes> PostgresHandler<TReq, TRes>
@@ -130,6 +159,24 @@ where
     TReq: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'static,
     TRes: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'static,
 {
+    /// Default serializer that attempts serde JSON deserialization.
+    /// On failure, returns the raw bytes as a lossy UTF-8 string for readability.
+    fn default_request_serializer() -> Serializer<TReq> {
+        Arc::new(|bytes| {
+            serde_json::from_slice::<TReq>(bytes)
+                .map_err(|_| String::from_utf8_lossy(bytes).to_string())
+        })
+    }
+
+    /// Default serializer that attempts serde JSON deserialization.
+    /// On failure, returns the raw bytes as a lossy UTF-8 string for readability.
+    fn default_response_serializer() -> Serializer<TRes> {
+        Arc::new(|bytes| {
+            serde_json::from_slice::<TRes>(bytes)
+                .map_err(|_| String::from_utf8_lossy(bytes).to_string())
+        })
+    }
+
     /// Create a new PostgreSQL handler with a connection pool.
     ///
     /// This will connect to the database but will NOT run migrations.
@@ -142,7 +189,7 @@ where
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use outlet_postgres::PostgresHandler;
+    /// use outlet_postgres::{PostgresHandler, migrator};
     /// use serde::{Deserialize, Serialize};
     /// use serde_json::Value;
     ///
@@ -156,10 +203,10 @@ where
     /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ///     // Run migrations first
     ///     let pool = sqlx::PgPool::connect("postgresql://user:pass@localhost/db").await?;
-    ///     PostgresHandler::<MyBodyType, MyBodyType>::migrator().run(&pool).await?;
+    ///     migrator().run(&pool).await?;
     ///     
     ///     // Create handler
-    ///     let handler = PostgresHandler::<MyBodyType>::new("postgresql://user:pass@localhost/db").await?;
+    ///     let handler = PostgresHandler::<MyBodyType, MyBodyType>::new("postgresql://user:pass@localhost/db").await?;
     ///     Ok(())
     /// }
     /// ```
@@ -170,9 +217,47 @@ where
 
         Ok(Self {
             pool,
-            _phantom_req: std::marker::PhantomData,
-            _phantom_res: std::marker::PhantomData,
+            request_serializer: Self::default_request_serializer(),
+            response_serializer: Self::default_response_serializer(),
         })
+    }
+
+    /// Add a custom request body serializer.
+    ///
+    /// The serializer function takes raw bytes and should return a `Result<TReq, String>`.
+    /// If the serializer succeeds, the result will be stored as JSONB and `body_parsed` will be true.
+    /// If it fails, the raw content will be stored as a UTF-8 string and `body_parsed` will be false.
+    ///
+    /// # Panics
+    ///
+    /// This will panic if the serializer succeeds but the resulting `TReq` value cannot be
+    /// converted to JSON via `serde_json::to_value()`. This indicates a bug in the `Serialize`
+    /// implementation of `TReq` and should be fixed by the caller.
+    pub fn with_request_serializer<F>(mut self, serializer: F) -> Self
+    where
+        F: Fn(&[u8]) -> Result<TReq, String> + Send + Sync + 'static,
+    {
+        self.request_serializer = Arc::new(serializer);
+        self
+    }
+
+    /// Add a custom response body serializer.
+    ///
+    /// The serializer function takes raw bytes and should return a `Result<TRes, String>`.
+    /// If the serializer succeeds, the result will be stored as JSONB and `body_parsed` will be true.
+    /// If it fails, the raw content will be stored as a UTF-8 string and `body_parsed` will be false.
+    ///
+    /// # Panics
+    ///
+    /// This will panic if the serializer succeeds but the resulting `TRes` value cannot be
+    /// converted to JSON via `serde_json::to_value()`. This indicates a bug in the `Serialize`
+    /// implementation of `TRes` and should be fixed by the caller.
+    pub fn with_response_serializer<F>(mut self, serializer: F) -> Self
+    where
+        F: Fn(&[u8]) -> Result<TRes, String> + Send + Sync + 'static,
+    {
+        self.response_serializer = Arc::new(serializer);
+        self
     }
 
     /// Create a PostgreSQL handler from an existing connection pool.
@@ -187,7 +272,7 @@ where
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use outlet_postgres::PostgresHandler;
+    /// use outlet_postgres::{PostgresHandler, migrator};
     /// use sqlx::PgPool;
     /// use serde::{Deserialize, Serialize};
     ///
@@ -202,60 +287,19 @@ where
     ///     let pool = PgPool::connect("postgresql://user:pass@localhost/db").await?;
     ///     
     ///     // Run migrations first
-    ///     PostgresHandler::<MyBodyType, MyBodyType>::migrator().run(&pool).await?;
+    ///     migrator().run(&pool).await?;
     ///     
     ///     // Create handler
-    ///     let handler = PostgresHandler::<MyBodyType>::from_pool(pool).await?;
+    ///     let handler = PostgresHandler::<MyBodyType, MyBodyType>::from_pool(pool).await?;
     ///     Ok(())
     /// }
     /// ```
     pub async fn from_pool(pool: PgPool) -> Result<Self, PostgresHandlerError> {
         Ok(Self {
             pool,
-            _phantom_req: std::marker::PhantomData,
-            _phantom_res: std::marker::PhantomData,
+            request_serializer: Self::default_request_serializer(),
+            response_serializer: Self::default_response_serializer(),
         })
-    }
-
-    /// Get the migrator for running outlet-postgres database migrations.
-    ///
-    /// This returns a SQLx migrator that can be used to set up the required
-    /// `http_requests` and `http_responses` tables. The consuming application
-    /// is responsible for running these migrations at the appropriate time
-    /// and in the appropriate database schema.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// use outlet_postgres::PostgresHandler;
-    /// use sqlx::{PgPool, Executor};
-    /// use serde_json::Value;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    ///     let pool = PgPool::connect("postgresql://user:pass@localhost/db").await?;
-    ///     
-    ///     // Run outlet migrations in a specific schema
-    ///     sqlx::query("SET search_path = 'outlet'").execute(&pool).await?;
-    ///     PostgresHandler::<Value, Value>::migrator().run(&pool).await?;
-    ///     sqlx::query("SET search_path = 'public'").execute(&pool).await?;
-    ///     
-    ///     // Create handler with schema-specific pool configured for outlet schema
-    ///     let outlet_pool = sqlx::postgres::PgPoolOptions::new()
-    ///         .after_connect(|conn, _meta| {
-    ///             Box::pin(async move {
-    ///                 conn.execute("SET search_path = 'outlet';").await?;
-    ///                 Ok(())
-    ///             })
-    ///         })
-    ///         .connect("postgresql://user:pass@localhost/db")
-    ///         .await?;
-    ///     let handler = PostgresHandler::<Value, Value>::from_pool(outlet_pool).await?;
-    ///     Ok(())
-    /// }
-    /// ```
-    pub fn migrator() -> sqlx::migrate::Migrator {
-        sqlx::migrate!("./migrations")
     }
 
     /// Convert headers to a JSONB-compatible format.
@@ -276,34 +320,46 @@ where
         serde_json::to_value(header_map).unwrap_or(Value::Null)
     }
 
-    /// Convert bytes to a JSONB value for requests, attempting to deserialize as TReq first.
-    /// If that fails, store the raw bytes as a base64-encoded string.
-    fn request_body_to_json_with_fallback(body: &[u8]) -> (Value, bool) {
-        // First try to deserialize as the typed request body TReq
-        if let Ok(typed_value) = serde_json::from_slice::<TReq>(body) {
-            if let Ok(json_value) = serde_json::to_value(typed_value) {
-                return (json_value, true);
+    /// Convert bytes to a JSONB value for requests using the configured serializer.
+    fn request_body_to_json_with_fallback(&self, body: &[u8]) -> (Value, bool) {
+        match (self.request_serializer)(body) {
+            Ok(typed_value) => {
+                if let Ok(json_value) = serde_json::to_value(&typed_value) {
+                    (json_value, true)
+                } else {
+                    // This should never happen if the type implements Serialize correctly
+                    (
+                        Value::String(
+                            serde_json::to_string(&typed_value)
+                                .expect("Serialized value must be convertible to JSON string"),
+                        ),
+                        false,
+                    )
+                }
             }
+            Err(raw_string) => (Value::String(raw_string), false),
         }
-
-        // If deserialization fails, store as base64-encoded string
-        let base64_string = base64::engine::general_purpose::STANDARD.encode(body);
-        (Value::String(base64_string), false)
     }
 
-    /// Convert bytes to a JSONB value for responses, attempting to deserialize as TRes first.
-    /// If that fails, store the raw bytes as a base64-encoded string.
-    fn response_body_to_json_with_fallback(body: &[u8]) -> (Value, bool) {
-        // First try to deserialize as the typed response body TRes
-        if let Ok(typed_value) = serde_json::from_slice::<TRes>(body) {
-            if let Ok(json_value) = serde_json::to_value(typed_value) {
-                return (json_value, true);
+    /// Convert bytes to a JSONB value for responses using the configured serializer.
+    fn response_body_to_json_with_fallback(&self, body: &[u8]) -> (Value, bool) {
+        match (self.response_serializer)(body) {
+            Ok(typed_value) => {
+                if let Ok(json_value) = serde_json::to_value(&typed_value) {
+                    (json_value, true)
+                } else {
+                    // This should never happen if the type implements Serialize correctly
+                    (
+                        Value::String(
+                            serde_json::to_string(&typed_value)
+                                .expect("Serialized value must be convertible to JSON string"),
+                        ),
+                        false,
+                    )
+                }
             }
+            Err(raw_string) => (Value::String(raw_string), false),
         }
-
-        // If deserialization fails, store as base64-encoded string
-        let base64_string = base64::engine::general_purpose::STANDARD.encode(body);
-        (Value::String(base64_string), false)
     }
 
     /// Get a repository for querying logged requests and responses.
@@ -327,7 +383,7 @@ where
             .body
             .as_ref()
             .map(|b| {
-                let (json, parsed) = Self::request_body_to_json_with_fallback(b);
+                let (json, parsed) = self.request_body_to_json_with_fallback(b);
                 (Some(json), parsed)
             })
             .unwrap_or((None, false));
@@ -364,7 +420,7 @@ where
             .body
             .as_ref()
             .map(|b| {
-                let (json, parsed) = Self::response_body_to_json_with_fallback(b);
+                let (json, parsed) = self.response_body_to_json_with_fallback(b);
                 (Some(json), parsed)
             })
             .unwrap_or((None, false));
@@ -464,10 +520,7 @@ mod tests {
     #[sqlx::test]
     async fn test_handler_creation(pool: PgPool) {
         // Run migrations first
-        PostgresHandler::<TestRequest, TestResponse>::migrator()
-            .run(&pool)
-            .await
-            .unwrap();
+        crate::migrator().run(&pool).await.unwrap();
 
         let handler = PostgresHandler::<TestRequest, TestResponse>::from_pool(pool.clone())
             .await
@@ -485,10 +538,7 @@ mod tests {
     #[sqlx::test]
     async fn test_handle_request_with_typed_body(pool: PgPool) {
         // Run migrations first
-        PostgresHandler::<TestRequest, TestResponse>::migrator()
-            .run(&pool)
-            .await
-            .unwrap();
+        crate::migrator().run(&pool).await.unwrap();
 
         let handler = PostgresHandler::<TestRequest, TestResponse>::from_pool(pool.clone())
             .await
@@ -543,10 +593,7 @@ mod tests {
     #[sqlx::test]
     async fn test_handle_response_with_typed_body(pool: PgPool) {
         // Run migrations first
-        PostgresHandler::<TestRequest, TestResponse>::migrator()
-            .run(&pool)
-            .await
-            .unwrap();
+        crate::migrator().run(&pool).await.unwrap();
 
         let handler = PostgresHandler::<TestRequest, TestResponse>::from_pool(pool.clone())
             .await
@@ -597,10 +644,7 @@ mod tests {
     #[sqlx::test]
     async fn test_handle_unparseable_body_fallback(pool: PgPool) {
         // Run migrations first
-        PostgresHandler::<TestRequest, TestResponse>::migrator()
-            .run(&pool)
-            .await
-            .unwrap();
+        crate::migrator().run(&pool).await.unwrap();
 
         let handler = PostgresHandler::<TestRequest, TestResponse>::from_pool(pool.clone())
             .await
@@ -646,10 +690,7 @@ mod tests {
     #[sqlx::test]
     async fn test_query_with_multiple_filters(pool: PgPool) {
         // Run migrations first
-        PostgresHandler::<Value, Value>::migrator()
-            .run(&pool)
-            .await
-            .unwrap();
+        crate::migrator().run(&pool).await.unwrap();
 
         let handler = PostgresHandler::<Value, Value>::from_pool(pool.clone())
             .await
@@ -737,10 +778,7 @@ mod tests {
     #[sqlx::test]
     async fn test_query_with_pagination_and_ordering(pool: PgPool) {
         // Run migrations first
-        PostgresHandler::<Value, Value>::migrator()
-            .run(&pool)
-            .await
-            .unwrap();
+        crate::migrator().run(&pool).await.unwrap();
 
         let handler = PostgresHandler::<Value, Value>::from_pool(pool.clone())
             .await
@@ -760,7 +798,7 @@ mod tests {
                 method: http::Method::GET,
                 uri: "/api/test".parse().unwrap(),
                 headers,
-                body: Some(Bytes::from(format!("{{\"id\": {}}}", i).into_bytes())),
+                body: Some(Bytes::from(format!("{{\"id\": {i}}}").into_bytes())),
                 timestamp,
                 correlation_id: 0,
             };
@@ -798,10 +836,7 @@ mod tests {
     #[sqlx::test]
     async fn test_headers_conversion(pool: PgPool) {
         // Run migrations first
-        PostgresHandler::<Value, Value>::migrator()
-            .run(&pool)
-            .await
-            .unwrap();
+        crate::migrator().run(&pool).await.unwrap();
 
         let handler = PostgresHandler::<Value, Value>::from_pool(pool.clone())
             .await
@@ -861,10 +896,7 @@ mod tests {
     #[sqlx::test]
     async fn test_timestamp_filtering(pool: PgPool) {
         // Run migrations first
-        PostgresHandler::<Value, Value>::migrator()
-            .run(&pool)
-            .await
-            .unwrap();
+        crate::migrator().run(&pool).await.unwrap();
 
         let handler = PostgresHandler::<Value, Value>::from_pool(pool.clone())
             .await
@@ -874,7 +906,7 @@ mod tests {
         let base_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_000); // Sept 2020
 
         // Insert requests at different times
-        let times = vec![
+        let times = [
             base_time + Duration::from_secs(0),    // correlation_id 4001
             base_time + Duration::from_secs(3600), // correlation_id 4002 (1 hour later)
             base_time + Duration::from_secs(7200), // correlation_id 4003 (2 hours later)

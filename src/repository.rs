@@ -1,4 +1,3 @@
-use base64::Engine;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde::de::Error;
@@ -241,16 +240,9 @@ where
                         Some(Ok(serde_json::from_value::<TReq>(json_value)
                             .map_err(PostgresHandlerError::Json)?))
                     } else {
-                        // Body is stored as base64 string, decode it
-                        if let Value::String(base64_str) = json_value {
-                            let decoded_bytes = base64::engine::general_purpose::STANDARD
-                                .decode(&base64_str)
-                                .map_err(|_| {
-                                    PostgresHandlerError::Json(Error::custom(
-                                        "Failed to decode base64",
-                                    ))
-                                })?;
-                            Some(Err(Bytes::from(decoded_bytes)))
+                        // Body is stored as UTF-8 string (raw content that failed to parse)
+                        if let Value::String(utf8_str) = json_value {
+                            Some(Err(Bytes::from(utf8_str.into_bytes())))
                         } else {
                             return Err(PostgresHandlerError::Json(Error::custom(
                                 "Invalid body format",
@@ -287,17 +279,9 @@ where
                                     Some(Ok(serde_json::from_value::<TRes>(json_value)
                                         .map_err(PostgresHandlerError::Json)?))
                                 } else {
-                                    // Body is stored as base64 string, decode it
-                                    if let Value::String(base64_str) = json_value {
-                                        let decoded_bytes =
-                                            base64::engine::general_purpose::STANDARD
-                                                .decode(&base64_str)
-                                                .map_err(|_| {
-                                                    PostgresHandlerError::Json(Error::custom(
-                                                        "Failed to decode base64",
-                                                    ))
-                                                })?;
-                                        Some(Err(Bytes::from(decoded_bytes)))
+                                    // Body is stored as UTF-8 string (raw content that failed to parse)
+                                    if let Value::String(utf8_str) = json_value {
+                                        Some(Err(Bytes::from(utf8_str.into_bytes())))
                                     } else {
                                         return Err(PostgresHandlerError::Json(Error::custom(
                                             "Invalid body format",
@@ -340,7 +324,7 @@ mod tests {
     fn validate_sql(sql: &str) -> Result<(), String> {
         let dialect = PostgreSqlDialect {};
         Parser::parse_sql(&dialect, sql)
-            .map_err(|e| format!("SQL parse error: {}", e))
+            .map_err(|e| format!("SQL parse error: {e}"))
             .map(|_| ())
     }
 
