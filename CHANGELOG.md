@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/doublewordai/outlet-postgres/compare/v0.1.2...v0.2.0) - 2025-08-29
+
+### Added
+
+- path filtering for logged responses
+- add custom serializers, move `migrator` into standalone function
+
 ## [0.1.2](https://github.com/doublewordai/outlet-postgres/compare/v0.1.1...v0.1.2) - 2025-08-28
 
 ### Added
