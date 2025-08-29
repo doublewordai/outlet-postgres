@@ -98,6 +98,7 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, error, instrument};
+use uuid::Uuid;
 
 pub mod error;
 pub mod repository;
@@ -153,6 +154,7 @@ where
     request_serializer: Serializer<TReq>,
     response_serializer: Serializer<TRes>,
     path_filter: Option<PathFilter>,
+    instance_id: Uuid,
 }
 
 /// Filter configuration for determining which requests to log.
@@ -232,6 +234,7 @@ where
             request_serializer: Self::default_request_serializer(),
             response_serializer: Self::default_response_serializer(),
             path_filter: None,
+            instance_id: Uuid::new_v4(),
         })
     }
 
@@ -359,6 +362,7 @@ where
             request_serializer: Self::default_request_serializer(),
             response_serializer: Self::default_response_serializer(),
             path_filter: None,
+            instance_id: Uuid::new_v4(),
         })
     }
 
@@ -483,10 +487,11 @@ where
 
         let result = sqlx::query(
             r#"
-            INSERT INTO http_requests (correlation_id, timestamp, method, uri, headers, body, body_parsed)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO http_requests (instance_id, correlation_id, timestamp, method, uri, headers, body, body_parsed)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             "#,
         )
+        .bind(self.instance_id)
         .bind(correlation_id as i64)
         .bind(timestamp)
         .bind(data.method.to_string())
@@ -521,11 +526,12 @@ where
 
         let result = sqlx::query(
             r#"
-            INSERT INTO http_responses (correlation_id, timestamp, status_code, headers, body, body_parsed, duration_ms)
-            SELECT $1, $2, $3, $4, $5, $6, $7
-            WHERE EXISTS (SELECT 1 FROM http_requests WHERE correlation_id = $1)
+            INSERT INTO http_responses (instance_id, correlation_id, timestamp, status_code, headers, body, body_parsed, duration_ms)
+            SELECT $1, $2, $3, $4, $5, $6, $7, $8
+            WHERE EXISTS (SELECT 1 FROM http_requests WHERE instance_id = $1 AND correlation_id = $2)
             "#,
         )
+        .bind(self.instance_id)
         .bind(correlation_id as i64)
         .bind(timestamp)
         .bind(data.status.as_u16() as i32)

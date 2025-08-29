@@ -4,12 +4,14 @@ use serde::de::Error;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{PgPool, QueryBuilder, Row};
+use uuid::Uuid;
 
 use crate::error::PostgresHandlerError;
 
 #[derive(Debug)]
 pub struct HttpRequest<TReq> {
     pub id: i64,
+    pub instance_id: Uuid,
     pub correlation_id: i64,
     pub timestamp: DateTime<Utc>,
     pub method: String,
@@ -22,6 +24,7 @@ pub struct HttpRequest<TReq> {
 #[derive(Debug)]
 pub struct HttpResponse<TRes> {
     pub id: i64,
+    pub instance_id: Uuid,
     pub correlation_id: i64,
     pub timestamp: DateTime<Utc>,
     pub status_code: i32,
@@ -39,6 +42,7 @@ pub struct RequestResponsePair<TReq, TRes> {
 
 #[derive(Debug, Default)]
 pub struct RequestFilter {
+    pub instance_id: Option<Uuid>,
     pub correlation_id: Option<i64>,
     pub method: Option<String>,
     pub uri_pattern: Option<String>,
@@ -60,21 +64,32 @@ impl RequestFilter {
         let mut query = QueryBuilder::new(
             r#"
             SELECT 
-                r.id as req_id, r.correlation_id as req_correlation_id, r.timestamp as req_timestamp, 
+                r.id as req_id, r.instance_id as req_instance_id, r.correlation_id as req_correlation_id, r.timestamp as req_timestamp, 
                 r.method, r.uri, r.headers as req_headers, r.body as req_body, r.body_parsed as req_body_parsed, r.created_at as req_created_at,
-                res.id as res_id, res.correlation_id as res_correlation_id, res.timestamp as res_timestamp,
+                res.id as res_id, res.instance_id as res_instance_id, res.correlation_id as res_correlation_id, res.timestamp as res_timestamp,
                 res.status_code, res.headers as res_headers, res.body as res_body, res.body_parsed as res_body_parsed, res.duration_ms, res.created_at as res_created_at
             FROM http_requests r
-            LEFT JOIN http_responses res ON r.correlation_id = res.correlation_id
+            LEFT JOIN http_responses res ON (r.instance_id = res.instance_id AND r.correlation_id = res.correlation_id)
             "#,
         );
 
         let mut where_added = false;
 
-        if let Some(correlation_id) = self.correlation_id {
-            query.push(" WHERE r.correlation_id = ");
-            query.push_bind(correlation_id);
+        if let Some(instance_id) = self.instance_id {
+            query.push(" WHERE r.instance_id = ");
+            query.push_bind(instance_id);
             where_added = true;
+        }
+
+        if let Some(correlation_id) = self.correlation_id {
+            if where_added {
+                query.push(" AND ");
+            } else {
+                query.push(" WHERE ");
+                where_added = true;
+            }
+            query.push("r.correlation_id = ");
+            query.push_bind(correlation_id);
         }
 
         if let Some(method) = &self.method {
@@ -255,6 +270,7 @@ where
 
             let request = HttpRequest {
                 id: row.get("req_id"),
+                instance_id: row.get("req_instance_id"),
                 correlation_id: row.get("req_correlation_id"),
                 timestamp: row.get("req_timestamp"),
                 method: row.get("method"),
@@ -294,6 +310,7 @@ where
 
                         Ok(HttpResponse {
                             id: row.get("res_id"),
+                            instance_id: row.get("res_instance_id"),
                             correlation_id: row.get("res_correlation_id"),
                             timestamp: row.get("res_timestamp"),
                             status_code: row.get("status_code"),
@@ -559,7 +576,7 @@ mod tests {
         assert!(sql.contains("SELECT"));
         assert!(sql.contains("FROM http_requests r"));
         assert!(
-            sql.contains("LEFT JOIN http_responses res ON r.correlation_id = res.correlation_id")
+            sql.contains("LEFT JOIN http_responses res ON (r.instance_id = res.instance_id AND r.correlation_id = res.correlation_id)")
         );
 
         // Should not contain WHERE clause
