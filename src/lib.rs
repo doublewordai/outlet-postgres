@@ -91,6 +91,7 @@
 //! ```
 
 use chrono::{DateTime, Utc};
+use http::Uri;
 use outlet::{RequestData, RequestHandler, ResponseData};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -427,14 +428,16 @@ where
     }
 
     /// Check if a request URI should be logged based on the configured path filter.
-    fn should_log_request(&self, uri: &str) -> bool {
+    fn should_log_request(&self, uri: &Uri) -> bool {
+        let path = uri.path();
+        debug!(%path, "Evaluating prefix");
         let Some(filter) = &self.path_filter else {
             return true; // No filter means log everything
         };
 
         // Check blocked prefixes first (they take precedence)
         for blocked_prefix in &filter.blocked_prefixes {
-            if uri.starts_with(blocked_prefix) {
+            if path.starts_with(blocked_prefix) {
                 return false;
             }
         }
@@ -448,7 +451,7 @@ where
         filter
             .allowed_prefixes
             .iter()
-            .any(|prefix| uri.starts_with(prefix))
+            .any(|prefix| path.starts_with(prefix))
     }
 
     /// Get a repository for querying logged requests and responses.
@@ -468,7 +471,7 @@ where
     #[instrument(skip(self, data), fields(correlation_id = %correlation_id))]
     async fn handle_request(&self, data: RequestData, correlation_id: u64) {
         // Check if this request should be logged
-        if !self.should_log_request(&data.uri.to_string()) {
+        if !self.should_log_request(&data.uri) {
             debug!(correlation_id = %correlation_id, uri = %data.uri, "Skipping request due to path filter");
             return;
         }
@@ -1143,11 +1146,11 @@ mod tests {
 
         // Test requests
         let test_cases = vec![
-            ("/api/users", 2001, true),    // Should be logged
-            ("/api/health", 2002, false),  // Should be BLOCKED
-            ("/api/metrics", 2003, false), // Should be BLOCKED
-            ("/api/orders", 2004, true),   // Should be logged
-            ("/health", 2005, false),      // Not in allowed prefixes
+            ("http://localhost/api/users", 2001, true), // Should be logged
+            ("http://localhost/api/health", 2002, false), // Should be BLOCKED
+            ("http://localhost/api/metrics", 2003, false), // Should be BLOCKED
+            ("http://localhost/api/orders", 2004, true), // Should be logged
+            ("http://localhost/health", 2005, false),   // Not in allowed prefixes
         ];
 
         for (uri, correlation_id, _should_log) in &test_cases {
