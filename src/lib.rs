@@ -4,35 +4,15 @@
 //! This crate implements the `RequestHandler` trait from outlet to log HTTP
 //! requests and responses to PostgreSQL with JSONB serialization for bodies.
 //!
-//! ## Features
-//!
-//! - **PostgreSQL Integration**: Uses sqlx for async PostgreSQL operations
-//! - **JSONB Bodies**: Serializes request/response bodies to JSONB fields
-//! - **Type-safe Querying**: Query logged data with typed request/response bodies
-//! - **Correlation**: Links requests and responses via correlation IDs
-//! - **Error Handling**: Graceful error handling with logging
-//!
 //! ## Quick Start
+//!
+//! Basic usage:
 //!
 //! ```rust,no_run
 //! use outlet::{RequestLoggerLayer, RequestLoggerConfig};
-//! use outlet_postgres::{PostgresHandler, repository::RequestFilter};
+//! use outlet_postgres::PostgresHandler;
 //! use axum::{routing::get, Router};
 //! use tower::ServiceBuilder;
-//! use serde::{Deserialize, Serialize};
-//!
-//! // Define your custom request and response body types
-//! #[derive(Clone, Debug, Deserialize, Serialize)]
-//! struct ApiRequest {
-//!     user_id: u64,
-//!     action: String,
-//! }
-//!
-//! #[derive(Clone, Debug, Deserialize, Serialize)]
-//! struct ApiResponse {
-//!     success: bool,
-//!     message: String,
-//! }
 //!
 //! async fn hello() -> &'static str {
 //!     "Hello, World!"
@@ -41,44 +21,8 @@
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let database_url = "postgresql://user:password@localhost/dbname";
-//!     
-//!     // Create handler with separate request and response types
-//!     let handler = PostgresHandler::<ApiRequest, ApiResponse>::new(database_url).await?;
-//!     
-//!     // Or use default Value types for flexible JSON storage
-//!     // let handler = PostgresHandler::new(database_url).await?;
-//!     
-//!     let layer = RequestLoggerLayer::new(RequestLoggerConfig::default(), handler.clone());
-//!
-//!     // Get a repository for querying logged requests and responses
-//!     let repository = handler.repository();
-//!     
-//!     // Query logged data with filters
-//!     let filter = RequestFilter {
-//!         method: Some("POST".to_string()),
-//!         status_code_min: Some(400),
-//!         limit: Some(10),
-//!         ..Default::default()
-//!     };
-//!     let results = repository.query(filter).await?;
-//!     
-//!     for pair in results {
-//!         println!("Request: {} {}", pair.request.method, pair.request.uri);
-//!         match pair.request.body {
-//!             Some(Ok(request_body)) => println!("  Parsed request: {:?}", request_body),
-//!             Some(Err(raw_bytes)) => println!("  Raw request bytes: {} bytes", raw_bytes.len()),
-//!             None => println!("  No request body"),
-//!         }
-//!         
-//!         if let Some(response) = pair.response {
-//!             println!("Response: {} ({}ms)", response.status_code, response.duration_ms);
-//!             match response.body {
-//!                 Some(Ok(response_body)) => println!("  Parsed response: {:?}", response_body),
-//!                 Some(Err(raw_bytes)) => println!("  Raw response bytes: {} bytes", raw_bytes.len()),
-//!                 None => println!("  No response body"),
-//!             }
-//!         }
-//!     }
+//!     let handler: PostgresHandler = PostgresHandler::new(database_url).await?;
+//!     let layer = RequestLoggerLayer::new(RequestLoggerConfig::default(), handler);
 //!
 //!     let app = Router::new()
 //!         .route("/hello", get(hello))
@@ -89,6 +33,53 @@
 //!     Ok(())
 //! }
 //! ```
+//!
+//! ## Features
+//!
+//! - **PostgreSQL Integration**: Uses sqlx for async PostgreSQL operations
+//! - **JSONB Bodies**: Serializes request/response bodies to JSONB fields
+//! - **Type-safe Querying**: Query logged data with typed request/response bodies
+//! - **Correlation**: Links requests and responses via correlation IDs
+//! - **Error Handling**: Graceful error handling with logging
+//! - **Flexible Serialization**: Generic error handling for custom serializer types
+
+/// Error type for serialization failures with fallback data.
+///
+/// When serializers fail to parse request/response bodies into structured types,
+/// this error provides both the parsing error details and fallback data that
+/// can be stored as a string representation.
+#[derive(Debug)]
+pub struct SerializationError {
+    /// The fallback representation of the data (e.g., base64-encoded, raw string)
+    pub fallback_data: String,
+    /// The underlying error that caused serialization to fail
+    pub error: Box<dyn std::error::Error + Send + Sync>,
+}
+
+impl SerializationError {
+    /// Create a new serialization error with fallback data
+    pub fn new(
+        fallback_data: String,
+        error: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            fallback_data,
+            error: Box::new(error),
+        }
+    }
+}
+
+impl std::fmt::Display for SerializationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Serialization failed: {}", self.error)
+    }
+}
+
+impl std::error::Error for SerializationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
+}
 
 use chrono::{DateTime, Utc};
 use http::Uri;
@@ -135,7 +126,23 @@ pub fn migrator() -> sqlx::migrate::Migrator {
     sqlx::migrate!("./migrations")
 }
 
-type Serializer<T> = Arc<dyn Fn(&[u8]) -> Result<T, String> + Send + Sync>;
+/// Type alias for request body serializers.
+///
+/// Request serializers take full request context including headers and body bytes.
+/// On failure, they return a `SerializationError` with fallback data.
+type RequestSerializer<T> =
+    Arc<dyn Fn(&outlet::RequestData) -> Result<T, SerializationError> + Send + Sync>;
+
+/// Type alias for response body serializers.
+///
+/// Response serializers take both request and response context, allowing them to
+/// make parsing decisions based on request details and response headers (e.g., compression).
+/// On failure, they return a `SerializationError` with fallback data.
+type ResponseSerializer<T> = Arc<
+    dyn Fn(&outlet::RequestData, &outlet::ResponseData) -> Result<T, SerializationError>
+        + Send
+        + Sync,
+>;
 
 /// PostgreSQL handler for outlet middleware.
 ///
@@ -152,8 +159,8 @@ where
     TRes: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'static,
 {
     pool: PgPool,
-    request_serializer: Serializer<TReq>,
-    response_serializer: Serializer<TRes>,
+    request_serializer: RequestSerializer<TReq>,
+    response_serializer: ResponseSerializer<TRes>,
     path_filter: Option<PathFilter>,
     instance_id: Uuid,
 }
@@ -175,20 +182,26 @@ where
     TRes: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'static,
 {
     /// Default serializer that attempts serde JSON deserialization.
-    /// On failure, returns the raw bytes as a lossy UTF-8 string for readability.
-    fn default_request_serializer() -> Serializer<TReq> {
-        Arc::new(|bytes| {
-            serde_json::from_slice::<TReq>(bytes)
-                .map_err(|_| String::from_utf8_lossy(bytes).to_string())
+    /// On failure, returns a SerializationError with raw bytes as fallback data.
+    fn default_request_serializer() -> RequestSerializer<TReq> {
+        Arc::new(|request_data| {
+            let bytes = request_data.body.as_deref().unwrap_or(&[]);
+            serde_json::from_slice::<TReq>(bytes).map_err(|error| {
+                let fallback_data = String::from_utf8_lossy(bytes).to_string();
+                SerializationError::new(fallback_data, error)
+            })
         })
     }
 
     /// Default serializer that attempts serde JSON deserialization.
-    /// On failure, returns the raw bytes as a lossy UTF-8 string for readability.
-    fn default_response_serializer() -> Serializer<TRes> {
-        Arc::new(|bytes| {
-            serde_json::from_slice::<TRes>(bytes)
-                .map_err(|_| String::from_utf8_lossy(bytes).to_string())
+    /// On failure, returns a SerializationError with raw bytes as fallback data.
+    fn default_response_serializer() -> ResponseSerializer<TRes> {
+        Arc::new(|_request_data, response_data| {
+            let bytes = response_data.body.as_deref().unwrap_or(&[]);
+            serde_json::from_slice::<TRes>(bytes).map_err(|error| {
+                let fallback_data = String::from_utf8_lossy(bytes).to_string();
+                SerializationError::new(fallback_data, error)
+            })
         })
     }
 
@@ -252,7 +265,7 @@ where
     /// implementation of `TReq` and should be fixed by the caller.
     pub fn with_request_serializer<F>(mut self, serializer: F) -> Self
     where
-        F: Fn(&[u8]) -> Result<TReq, String> + Send + Sync + 'static,
+        F: Fn(&outlet::RequestData) -> Result<TReq, SerializationError> + Send + Sync + 'static,
     {
         self.request_serializer = Arc::new(serializer);
         self
@@ -271,7 +284,10 @@ where
     /// implementation of `TRes` and should be fixed by the caller.
     pub fn with_response_serializer<F>(mut self, serializer: F) -> Self
     where
-        F: Fn(&[u8]) -> Result<TRes, String> + Send + Sync + 'static,
+        F: Fn(&outlet::RequestData, &outlet::ResponseData) -> Result<TRes, SerializationError>
+            + Send
+            + Sync
+            + 'static,
     {
         self.response_serializer = Arc::new(serializer);
         self
@@ -385,9 +401,12 @@ where
         serde_json::to_value(header_map).unwrap_or(Value::Null)
     }
 
-    /// Convert bytes to a JSONB value for requests using the configured serializer.
-    fn request_body_to_json_with_fallback(&self, body: &[u8]) -> (Value, bool) {
-        match (self.request_serializer)(body) {
+    /// Convert request data to a JSONB value using the configured serializer.
+    fn request_body_to_json_with_fallback(
+        &self,
+        request_data: &outlet::RequestData,
+    ) -> (Value, bool) {
+        match (self.request_serializer)(request_data) {
             Ok(typed_value) => {
                 if let Ok(json_value) = serde_json::to_value(&typed_value) {
                     (json_value, true)
@@ -402,13 +421,17 @@ where
                     )
                 }
             }
-            Err(raw_string) => (Value::String(raw_string), false),
+            Err(serialization_error) => (Value::String(serialization_error.fallback_data), false),
         }
     }
 
-    /// Convert bytes to a JSONB value for responses using the configured serializer.
-    fn response_body_to_json_with_fallback(&self, body: &[u8]) -> (Value, bool) {
-        match (self.response_serializer)(body) {
+    /// Convert response data to a JSONB value using the configured serializer.
+    fn response_body_to_json_with_fallback(
+        &self,
+        request_data: &outlet::RequestData,
+        response_data: &outlet::ResponseData,
+    ) -> (Value, bool) {
+        match (self.response_serializer)(request_data, response_data) {
             Ok(typed_value) => {
                 if let Ok(json_value) = serde_json::to_value(&typed_value) {
                     (json_value, true)
@@ -423,7 +446,7 @@ where
                     )
                 }
             }
-            Err(raw_string) => (Value::String(raw_string), false),
+            Err(serialization_error) => (Value::String(serialization_error.fallback_data), false),
         }
     }
 
@@ -468,23 +491,21 @@ where
     TReq: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'static,
     TRes: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'static,
 {
-    #[instrument(skip(self, data), fields(correlation_id = %correlation_id))]
-    async fn handle_request(&self, data: RequestData, correlation_id: u64) {
+    #[instrument(skip(self, data), fields(correlation_id = %data.correlation_id))]
+    async fn handle_request(&self, data: RequestData) {
         // Check if this request should be logged
         if !self.should_log_request(&data.uri) {
-            debug!(correlation_id = %correlation_id, uri = %data.uri, "Skipping request due to path filter");
+            debug!(correlation_id = %data.correlation_id, uri = %data.uri, "Skipping request due to path filter");
             return;
         }
 
         let headers_json = Self::headers_to_json(&data.headers);
-        let (body_json, parsed) = data
-            .body
-            .as_ref()
-            .map(|b| {
-                let (json, parsed) = self.request_body_to_json_with_fallback(b);
-                (Some(json), parsed)
-            })
-            .unwrap_or((None, false));
+        let (body_json, parsed) = if data.body.is_some() {
+            let (json, parsed) = self.request_body_to_json_with_fallback(&data);
+            (Some(json), parsed)
+        } else {
+            (None, false)
+        };
 
         let timestamp: DateTime<Utc> = data.timestamp.into();
 
@@ -495,7 +516,7 @@ where
             "#,
         )
         .bind(self.instance_id)
-        .bind(correlation_id as i64)
+        .bind(data.correlation_id as i64)
         .bind(timestamp)
         .bind(data.method.to_string())
         .bind(data.uri.to_string())
@@ -506,26 +527,25 @@ where
         .await;
 
         if let Err(e) = result {
-            error!(correlation_id = %correlation_id, error = %e, "Failed to insert request data");
+            error!(correlation_id = %data.correlation_id, error = %e, "Failed to insert request data");
         } else {
-            debug!(correlation_id = %correlation_id, "Request data inserted successfully");
+            debug!(correlation_id = %data.correlation_id, "Request data inserted successfully");
         }
     }
 
-    #[instrument(skip(self, data), fields(correlation_id = %correlation_id))]
-    async fn handle_response(&self, data: ResponseData, correlation_id: u64) {
-        let headers_json = Self::headers_to_json(&data.headers);
-        let (body_json, parsed) = data
-            .body
-            .as_ref()
-            .map(|b| {
-                let (json, parsed) = self.response_body_to_json_with_fallback(b);
-                (Some(json), parsed)
-            })
-            .unwrap_or((None, false));
+    #[instrument(skip(self, request_data, response_data), fields(correlation_id = %request_data.correlation_id))]
+    async fn handle_response(&self, request_data: RequestData, response_data: ResponseData) {
+        let headers_json = Self::headers_to_json(&response_data.headers);
+        let (body_json, parsed) = if response_data.body.is_some() {
+            let (json, parsed) =
+                self.response_body_to_json_with_fallback(&request_data, &response_data);
+            (Some(json), parsed)
+        } else {
+            (None, false)
+        };
 
-        let timestamp: DateTime<Utc> = data.timestamp.into();
-        let duration_ms = data.duration.as_millis() as i64;
+        let timestamp: DateTime<Utc> = response_data.timestamp.into();
+        let duration_ms = response_data.duration.as_millis() as i64;
 
         let result = sqlx::query(
             r#"
@@ -535,9 +555,9 @@ where
             "#,
         )
         .bind(self.instance_id)
-        .bind(correlation_id as i64)
+        .bind(request_data.correlation_id as i64)
         .bind(timestamp)
-        .bind(data.status.as_u16() as i32)
+        .bind(response_data.status.as_u16() as i32)
         .bind(headers_json)
         .bind(body_json)
         .bind(parsed)
@@ -547,13 +567,13 @@ where
 
         match result {
             Err(e) => {
-                error!(correlation_id = %correlation_id, error = %e, "Failed to insert response data");
+                error!(correlation_id = %request_data.correlation_id, error = %e, "Failed to insert response data");
             }
             Ok(query_result) => {
                 if query_result.rows_affected() > 0 {
-                    debug!(correlation_id = %correlation_id, "Response data inserted successfully");
+                    debug!(correlation_id = %request_data.correlation_id, "Response data inserted successfully");
                 } else {
-                    debug!(correlation_id = %correlation_id, "Response skipped - no corresponding request found (likely filtered out)");
+                    debug!(correlation_id = %request_data.correlation_id, "No matching request found for response, skipping insert")
                 }
             }
         }
@@ -653,13 +673,12 @@ mod tests {
             .unwrap();
         let repository = handler.repository();
 
-        let request_data = create_test_request_data();
+        let mut request_data = create_test_request_data();
         let correlation_id = 12345;
+        request_data.correlation_id = correlation_id;
 
         // Handle the request
-        handler
-            .handle_request(request_data.clone(), correlation_id)
-            .await;
+        handler.handle_request(request_data.clone()).await;
 
         // Query back the request
         let filter = RequestFilter {
@@ -708,14 +727,16 @@ mod tests {
             .unwrap();
         let repository = handler.repository();
 
-        let request_data = create_test_request_data();
-        let response_data = create_test_response_data();
+        let mut request_data = create_test_request_data();
+        let mut response_data = create_test_response_data();
         let correlation_id = 54321;
+        request_data.correlation_id = correlation_id;
+        response_data.correlation_id = correlation_id;
 
         // Handle both request and response
-        handler.handle_request(request_data, correlation_id).await;
+        handler.handle_request(request_data.clone()).await;
         handler
-            .handle_response(response_data.clone(), correlation_id)
+            .handle_response(request_data, response_data.clone())
             .await;
 
         // Query back the complete pair
@@ -764,17 +785,17 @@ mod tests {
         headers.insert("content-type".to_string(), vec!["text/plain".into()]);
 
         let invalid_json_body = b"not valid json for TestRequest";
+        let correlation_id = 99999;
         let request_data = RequestData {
             method: http::Method::POST,
             uri: http::Uri::from_static("/api/test"),
             headers,
             body: Some(Bytes::from(invalid_json_body.to_vec())),
             timestamp: SystemTime::now(),
-            correlation_id: 0,
+            correlation_id,
         };
 
-        let correlation_id = 99999;
-        handler.handle_request(request_data, correlation_id).await;
+        handler.handle_request(request_data).await;
 
         // Query back and verify fallback to base64
         let filter = RequestFilter {
@@ -823,11 +844,11 @@ mod tests {
                 headers: headers.clone(),
                 body: Some(Bytes::from(b"{}".to_vec())),
                 timestamp: SystemTime::now(),
-                correlation_id: 0,
+                correlation_id,
             };
 
             let response_data = ResponseData {
-                correlation_id: 0,
+                correlation_id,
                 status: http::StatusCode::from_u16(status).unwrap(),
                 headers,
                 body: Some(Bytes::from(b"{}".to_vec())),
@@ -835,8 +856,8 @@ mod tests {
                 duration: Duration::from_millis(duration_ms),
             };
 
-            handler.handle_request(request_data, correlation_id).await;
-            handler.handle_response(response_data, correlation_id).await;
+            handler.handle_request(request_data.clone()).await;
+            handler.handle_response(request_data, response_data).await;
         }
 
         // Test method filter
@@ -908,10 +929,10 @@ mod tests {
                 headers,
                 body: Some(Bytes::from(format!("{{\"id\": {i}}}").into_bytes())),
                 timestamp,
-                correlation_id: 0,
+                correlation_id,
             };
 
-            handler.handle_request(request_data, correlation_id).await;
+            handler.handle_request(request_data).await;
         }
 
         // Test default ordering (ASC) with limit
@@ -961,7 +982,7 @@ mod tests {
         headers.insert("empty-value".to_string(), vec!["".into()]);
 
         let request_data = RequestData {
-            correlation_id: 0,
+            correlation_id: 3000,
             method: http::Method::GET,
             uri: "/test".parse().unwrap(),
             headers,
@@ -970,7 +991,7 @@ mod tests {
         };
 
         let correlation_id = 3000;
-        handler.handle_request(request_data, correlation_id).await;
+        handler.handle_request(request_data).await;
 
         let filter = RequestFilter {
             correlation_id: Some(correlation_id as i64),
@@ -1028,10 +1049,10 @@ mod tests {
                 headers: HashMap::new(),
                 body: None,
                 timestamp: *timestamp,
-                correlation_id: 0,
+                correlation_id,
             };
 
-            handler.handle_request(request_data, correlation_id).await;
+            handler.handle_request(request_data).await;
         }
 
         // Test timestamp_after filter
@@ -1093,11 +1114,11 @@ mod tests {
                 headers: headers.clone(),
                 body: Some(Bytes::from(b"{}".to_vec())),
                 timestamp: SystemTime::now(),
-                correlation_id: 0,
+                correlation_id: *correlation_id,
             };
 
             let response_data = ResponseData {
-                correlation_id: 0,
+                correlation_id: *correlation_id,
                 status: http::StatusCode::OK,
                 headers,
                 body: Some(Bytes::from(b"{}".to_vec())),
@@ -1105,10 +1126,8 @@ mod tests {
                 duration: Duration::from_millis(100),
             };
 
-            handler.handle_request(request_data, *correlation_id).await;
-            handler
-                .handle_response(response_data, *correlation_id)
-                .await;
+            handler.handle_request(request_data.clone()).await;
+            handler.handle_response(request_data, response_data).await;
         }
 
         // Query all requests and verify filtering worked
@@ -1163,11 +1182,11 @@ mod tests {
                 headers: headers.clone(),
                 body: Some(Bytes::from(b"{}".to_vec())),
                 timestamp: SystemTime::now(),
-                correlation_id: 0,
+                correlation_id: *correlation_id,
             };
 
             let response_data = ResponseData {
-                correlation_id: 0,
+                correlation_id: *correlation_id,
                 status: http::StatusCode::OK,
                 headers,
                 body: Some(Bytes::from(b"{}".to_vec())),
@@ -1175,10 +1194,8 @@ mod tests {
                 duration: Duration::from_millis(100),
             };
 
-            handler.handle_request(request_data, *correlation_id).await;
-            handler
-                .handle_response(response_data, *correlation_id)
-                .await;
+            handler.handle_request(request_data.clone()).await;
+            handler.handle_response(request_data, response_data).await;
         }
 
         // Should only have logged 2001 and 2004 (blocked prefixes take precedence)
@@ -1217,10 +1234,10 @@ mod tests {
                 headers,
                 body: Some(Bytes::from(b"{}".to_vec())),
                 timestamp: SystemTime::now(),
-                correlation_id: 0,
+                correlation_id,
             };
 
-            handler.handle_request(request_data, correlation_id).await;
+            handler.handle_request(request_data).await;
         }
 
         // Should have logged all 4 requests
