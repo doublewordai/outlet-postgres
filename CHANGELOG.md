@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/doublewordai/outlet-postgres/compare/v0.3.0...v0.3.1) - 2025-09-02
+
+### Other
+
+- Update outlet and outlet-postgres versions in README
+- Merge branch 'main' of https://github.com/doublewordai/outlet-postgres
+- Update API to match outlet v0.3.0
+- Update outlet dependency to v0.3.0
+
 ## [0.3.0](https://github.com/doublewordai/outlet-postgres/compare/v0.2.0...v0.3.0) - 2025-09-01
 
 ### Fixed
