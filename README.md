@@ -13,8 +13,8 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-outlet = "0.1.0"
-outlet-postgres = "0.1.0"
+outlet = "0.3.0"
+outlet-postgres = "0.4.0"
 axum = "0.8"
 tokio = { version = "1.0", features = ["full"] }
 tower = "0.5"
