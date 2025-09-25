@@ -210,7 +210,6 @@ impl RequestFilter {
                 query.push(" AND ");
             } else {
                 query.push(" WHERE ");
-                where_added = true;
             }
             query.push("res.duration_to_first_byte_ms <= ");
             query.push_bind(max_duration_to_first_byte);
