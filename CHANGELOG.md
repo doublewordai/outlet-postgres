@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/doublewordai/outlet-postgres/compare/v0.3.1...v0.4.0) - 2025-09-25
+
+### Added
+
+- split off time-to-first-byte from duration
+
+### Fixed
+
+- clippy
+
+### Other
+
+- Merge pull request #7 from doublewordai/time-to-first-byte
+
 ## [0.3.1](https://github.com/doublewordai/outlet-postgres/compare/v0.3.0...v0.3.1) - 2025-09-02
 
 ### Other
