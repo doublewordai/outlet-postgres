@@ -103,6 +103,7 @@ struct RequestSummary {
     uri: String,
     timestamp: String,
     status_code: Option<i32>,
+    duration_to_first_byte_ms: Option<i64>,
     duration_ms: Option<i64>,
     request_body: Option<CreateUserRequest>,
     response_body: Option<ApiResponse>,
@@ -152,6 +153,10 @@ async fn get_requests(
                         uri: pair.request.uri,
                         timestamp: pair.request.timestamp.to_rfc3339(),
                         status_code: pair.response.as_ref().map(|r| r.status_code),
+                        duration_to_first_byte_ms: pair
+                            .response
+                            .as_ref()
+                            .map(|r| r.duration_to_first_byte_ms),
                         duration_ms: pair.response.as_ref().map(|r| r.duration_ms),
                         request_body,
                         response_body,
@@ -209,6 +214,10 @@ async fn get_errors(
                         uri: pair.request.uri,
                         timestamp: pair.request.timestamp.to_rfc3339(),
                         status_code: pair.response.as_ref().map(|r| r.status_code),
+                        duration_to_first_byte_ms: pair
+                            .response
+                            .as_ref()
+                            .map(|r| r.duration_to_first_byte_ms),
                         duration_ms: pair.response.as_ref().map(|r| r.duration_ms),
                         request_body,
                         response_body,
@@ -265,6 +274,10 @@ async fn get_slow_requests(
                         uri: pair.request.uri,
                         timestamp: pair.request.timestamp.to_rfc3339(),
                         status_code: pair.response.as_ref().map(|r| r.status_code),
+                        duration_to_first_byte_ms: pair
+                            .response
+                            .as_ref()
+                            .map(|r| r.duration_to_first_byte_ms),
                         duration_ms: pair.response.as_ref().map(|r| r.duration_ms),
                         request_body,
                         response_body,

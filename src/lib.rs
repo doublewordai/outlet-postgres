@@ -546,11 +546,12 @@ where
 
         let timestamp: DateTime<Utc> = response_data.timestamp.into();
         let duration_ms = response_data.duration.as_millis() as i64;
+        let duration_to_first_byte_ms = response_data.duration_to_first_byte.as_millis() as i64;
 
         let result = sqlx::query(
             r#"
-            INSERT INTO http_responses (instance_id, correlation_id, timestamp, status_code, headers, body, body_parsed, duration_ms)
-            SELECT $1, $2, $3, $4, $5, $6, $7, $8
+            INSERT INTO http_responses (instance_id, correlation_id, timestamp, status_code, headers, body, body_parsed, duration_to_first_byte_ms, duration_ms)
+            SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9
             WHERE EXISTS (SELECT 1 FROM http_requests WHERE instance_id = $1 AND correlation_id = $2)
             "#,
         )
@@ -561,6 +562,7 @@ where
         .bind(headers_json)
         .bind(body_json)
         .bind(parsed)
+        .bind(duration_to_first_byte_ms)
         .bind(duration_ms)
         .execute(&self.pool)
         .await;
@@ -640,6 +642,7 @@ mod tests {
             headers,
             body: Some(Bytes::from(body)),
             timestamp: SystemTime::now(),
+            duration_to_first_byte: Duration::from_millis(100),
             duration: Duration::from_millis(150),
             correlation_id: 0,
         }
@@ -853,6 +856,7 @@ mod tests {
                 headers,
                 body: Some(Bytes::from(b"{}".to_vec())),
                 timestamp: SystemTime::now(),
+                duration_to_first_byte: Duration::from_millis(duration_ms / 2),
                 duration: Duration::from_millis(duration_ms),
             };
 
@@ -1123,6 +1127,7 @@ mod tests {
                 headers,
                 body: Some(Bytes::from(b"{}".to_vec())),
                 timestamp: SystemTime::now(),
+                duration_to_first_byte: Duration::from_millis(80),
                 duration: Duration::from_millis(100),
             };
 
@@ -1191,6 +1196,7 @@ mod tests {
                 headers,
                 body: Some(Bytes::from(b"{}".to_vec())),
                 timestamp: SystemTime::now(),
+                duration_to_first_byte: Duration::from_millis(80),
                 duration: Duration::from_millis(100),
             };
 

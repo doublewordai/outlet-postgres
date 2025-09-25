@@ -30,6 +30,7 @@ pub struct HttpResponse<TRes> {
     pub status_code: i32,
     pub headers: Value,
     pub body: Option<Result<TRes, Bytes>>,
+    pub duration_to_first_byte_ms: i64,
     pub duration_ms: i64,
     pub created_at: DateTime<Utc>,
 }
@@ -53,6 +54,8 @@ pub struct RequestFilter {
     pub timestamp_before: Option<DateTime<Utc>>,
     pub min_duration_ms: Option<i64>,
     pub max_duration_ms: Option<i64>,
+    pub min_duration_to_first_byte_ms: Option<i64>,
+    pub max_duration_to_first_byte_ms: Option<i64>,
     pub body_parsed: Option<bool>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
@@ -67,7 +70,7 @@ impl RequestFilter {
                 r.id as req_id, r.instance_id as req_instance_id, r.correlation_id as req_correlation_id, r.timestamp as req_timestamp, 
                 r.method, r.uri, r.headers as req_headers, r.body as req_body, r.body_parsed as req_body_parsed, r.created_at as req_created_at,
                 res.id as res_id, res.instance_id as res_instance_id, res.correlation_id as res_correlation_id, res.timestamp as res_timestamp,
-                res.status_code, res.headers as res_headers, res.body as res_body, res.body_parsed as res_body_parsed, res.duration_ms, res.created_at as res_created_at
+                res.status_code, res.headers as res_headers, res.body as res_body, res.body_parsed as res_body_parsed, res.duration_to_first_byte_ms, res.duration_ms, res.created_at as res_created_at
             FROM http_requests r
             LEFT JOIN http_responses res ON (r.instance_id = res.instance_id AND r.correlation_id = res.correlation_id)
             "#,
@@ -185,9 +188,31 @@ impl RequestFilter {
                 query.push(" AND ");
             } else {
                 query.push(" WHERE ");
+                where_added = true;
             }
             query.push("res.duration_ms <= ");
             query.push_bind(max_duration);
+        }
+
+        if let Some(min_duration_to_first_byte) = self.min_duration_to_first_byte_ms {
+            if where_added {
+                query.push(" AND ");
+            } else {
+                query.push(" WHERE ");
+                where_added = true;
+            }
+            query.push("res.duration_to_first_byte_ms >= ");
+            query.push_bind(min_duration_to_first_byte);
+        }
+
+        if let Some(max_duration_to_first_byte) = self.max_duration_to_first_byte_ms {
+            if where_added {
+                query.push(" AND ");
+            } else {
+                query.push(" WHERE ");
+            }
+            query.push("res.duration_to_first_byte_ms <= ");
+            query.push_bind(max_duration_to_first_byte);
         }
 
         if self.order_by_timestamp_desc {
@@ -316,6 +341,7 @@ where
                             status_code: row.get("status_code"),
                             headers: row.get("res_headers"),
                             body: response_body,
+                            duration_to_first_byte_ms: row.get("duration_to_first_byte_ms"),
                             duration_ms: row.get("duration_ms"),
                             created_at: row.get("res_created_at"),
                         })
