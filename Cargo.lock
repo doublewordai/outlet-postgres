@@ -1072,9 +1072,7 @@ checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
 
 [[package]]
 name = "outlet"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f764582d7a83fe58cbf4cc4dc15b0b34b8db1225dcc65028bdcaeddaf203b58"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-stream",

@@ -94,22 +94,26 @@ async fn dump_responses(
         (
             uuid::Uuid,
             uuid::Uuid,
+            uuid::Uuid,
             chrono::DateTime<chrono::Utc>,
             String,
             String,
             serde_json::Value,
             serde_json::Value,
             Option<uuid::Uuid>,
+            Option<uuid::Uuid>,
             Option<chrono::DateTime<chrono::Utc>>,
-            Option<i16>,
-            Option<serde_json::Value>,
-            Option<serde_json::Value>,
             Option<i32>,
+            Option<serde_json::Value>,
+            Option<serde_json::Value>,
+            Option<i64>,
+            Option<i64>,
         ),
     >(
         r#"
-        SELECT 
+        SELECT
             req.id,
+            req.instance_id,
             req.correlation_id,
             req.timestamp,
             req.method,
@@ -117,13 +121,15 @@ async fn dump_responses(
             req.headers,
             req.body,
             resp.id,
+            resp.instance_id,
             resp.timestamp,
             resp.status_code,
             resp.headers,
             resp.body,
+            resp.duration_to_first_byte_ms,
             resp.duration_ms
         FROM http_requests req
-        LEFT JOIN http_responses resp ON req.correlation_id = resp.correlation_id
+        LEFT JOIN http_responses resp ON req.instance_id = resp.instance_id AND req.correlation_id = resp.correlation_id
         ORDER BY req.timestamp DESC
         LIMIT $1 OFFSET $2
         "#,
@@ -140,6 +146,7 @@ async fn dump_responses(
                 .map(|row| {
                     let (
                         request_id,
+                        _request_instance_id,
                         correlation_id,
                         request_timestamp,
                         method,
@@ -147,10 +154,12 @@ async fn dump_responses(
                         request_headers,
                         request_body,
                         response_id,
+                        _response_instance_id,
                         response_timestamp,
                         status_code,
                         response_headers,
                         response_body,
+                        duration_to_first_byte_ms,
                         duration_ms,
                     ) = row;
                     let response = match response_id {
@@ -160,6 +169,7 @@ async fn dump_responses(
                             "status_code": status_code,
                             "headers": response_headers,
                             "body": response_body,
+                            "duration_to_first_byte_ms": duration_to_first_byte_ms,
                             "duration_ms": duration_ms
                         }),
                         None => Value::Null,
