@@ -535,6 +535,10 @@ where
 
     #[instrument(skip(self, request_data, response_data), fields(correlation_id = %request_data.correlation_id))]
     async fn handle_response(&self, request_data: RequestData, response_data: ResponseData) {
+        if !self.should_log_request(&request_data.uri) {
+            debug!(correlation_id = %request_data.correlation_id, uri = %request_data.uri, "Skipping response due to path filter");
+            return;
+        }
         let headers_json = Self::headers_to_json(&response_data.headers);
         let (body_json, parsed) = if response_data.body.is_some() {
             let (json, parsed) =
