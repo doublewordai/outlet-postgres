@@ -1,6 +1,6 @@
 [package]
 name = "outlet-postgres"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 description = "PostgreSQL logging handler for outlet HTTP request/response middleware"
 license = "MIT"
