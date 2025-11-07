@@ -82,7 +82,6 @@ impl std::error::Error for SerializationError {
 }
 
 use chrono::{DateTime, Utc};
-use http::Uri;
 use outlet::{RequestData, RequestHandler, ResponseData};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -161,19 +160,7 @@ where
     pool: PgPool,
     request_serializer: RequestSerializer<TReq>,
     response_serializer: ResponseSerializer<TRes>,
-    path_filter: Option<PathFilter>,
     instance_id: Uuid,
-}
-
-/// Filter configuration for determining which requests to log.
-#[derive(Clone, Debug)]
-pub struct PathFilter {
-    /// Only log requests whose URI path starts with any of these prefixes.
-    /// If empty, all requests are logged.
-    pub allowed_prefixes: Vec<String>,
-    /// Skip requests whose URI path starts with any of these prefixes.
-    /// Takes precedence over allowed_prefixes.
-    pub blocked_prefixes: Vec<String>,
 }
 
 impl<TReq, TRes> PostgresHandler<TReq, TRes>
@@ -247,7 +234,6 @@ where
             pool,
             request_serializer: Self::default_request_serializer(),
             response_serializer: Self::default_response_serializer(),
-            path_filter: None,
             instance_id: Uuid::new_v4(),
         })
     }
@@ -293,52 +279,6 @@ where
         self
     }
 
-    /// Add path filtering to only log requests for specific URI prefixes.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// use outlet_postgres::{PostgresHandler, PathFilter};
-    ///
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// use serde_json::Value;
-    /// let handler = PostgresHandler::<Value, Value>::new("postgresql://user:pass@localhost/db")
-    ///     .await?
-    ///     .with_path_filter(PathFilter {
-    ///         allowed_prefixes: vec!["/api/".to_string(), "/webhook/".to_string()],
-    ///         blocked_prefixes: vec!["/api/health".to_string()],
-    ///     });
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn with_path_filter(mut self, filter: PathFilter) -> Self {
-        self.path_filter = Some(filter);
-        self
-    }
-
-    /// Add simple path prefix filtering - only log requests starting with the given prefix.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// use outlet_postgres::PostgresHandler;
-    ///
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// use serde_json::Value;
-    /// let handler = PostgresHandler::<Value, Value>::new("postgresql://user:pass@localhost/db")
-    ///     .await?
-    ///     .with_path_prefix("/api/");
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn with_path_prefix(mut self, prefix: &str) -> Self {
-        self.path_filter = Some(PathFilter {
-            allowed_prefixes: vec![prefix.to_string()],
-            blocked_prefixes: vec![],
-        });
-        self
-    }
-
     /// Create a PostgreSQL handler from an existing connection pool.
     ///
     /// Use this if you already have a connection pool and want to reuse it.
@@ -378,7 +318,6 @@ where
             pool,
             request_serializer: Self::default_request_serializer(),
             response_serializer: Self::default_response_serializer(),
-            path_filter: None,
             instance_id: Uuid::new_v4(),
         })
     }
@@ -450,33 +389,6 @@ where
         }
     }
 
-    /// Check if a request URI should be logged based on the configured path filter.
-    fn should_log_request(&self, uri: &Uri) -> bool {
-        let path = uri.path();
-        debug!(%path, "Evaluating prefix");
-        let Some(filter) = &self.path_filter else {
-            return true; // No filter means log everything
-        };
-
-        // Check blocked prefixes first (they take precedence)
-        for blocked_prefix in &filter.blocked_prefixes {
-            if path.starts_with(blocked_prefix) {
-                return false;
-            }
-        }
-
-        // If no allowed prefixes specified, allow everything (after blocked check)
-        if filter.allowed_prefixes.is_empty() {
-            return true;
-        }
-
-        // Check if URI matches any allowed prefix
-        filter
-            .allowed_prefixes
-            .iter()
-            .any(|prefix| path.starts_with(prefix))
-    }
-
     /// Get a repository for querying logged requests and responses.
     ///
     /// Returns a `RequestRepository` with the same type parameters as this handler,
@@ -493,12 +405,6 @@ where
 {
     #[instrument(skip(self, data), fields(correlation_id = %data.correlation_id))]
     async fn handle_request(&self, data: RequestData) {
-        // Check if this request should be logged
-        if !self.should_log_request(&data.uri) {
-            debug!(correlation_id = %data.correlation_id, uri = %data.uri, "Skipping request due to path filter");
-            return;
-        }
-
         let headers_json = Self::headers_to_json(&data.headers);
         let (body_json, parsed) = if data.body.is_some() {
             let (json, parsed) = self.request_body_to_json_with_fallback(&data);
@@ -535,10 +441,6 @@ where
 
     #[instrument(skip(self, request_data, response_data), fields(correlation_id = %request_data.correlation_id))]
     async fn handle_response(&self, request_data: RequestData, response_data: ResponseData) {
-        if !self.should_log_request(&request_data.uri) {
-            debug!(correlation_id = %request_data.correlation_id, uri = %request_data.uri, "Skipping response due to path filter");
-            return;
-        }
         let headers_json = Self::headers_to_json(&response_data.headers);
         let (body_json, parsed) = if response_data.body.is_some() {
             let (json, parsed) =
@@ -1092,134 +994,9 @@ mod tests {
         assert_eq!(results[0].request.correlation_id, 4002);
     }
 
-    #[sqlx::test]
-    async fn test_path_filtering_allowed_prefix(pool: PgPool) {
-        // Run migrations first
-        crate::migrator().run(&pool).await.unwrap();
-
-        let handler = PostgresHandler::<Value, Value>::from_pool(pool.clone())
-            .await
-            .unwrap()
-            .with_path_prefix("/api/");
-        let repository = handler.repository();
-
-        // Test requests - some should be logged, some shouldn't
-        let test_cases = vec![
-            ("/api/users", 1001, true),  // Should be logged
-            ("/api/orders", 1002, true), // Should be logged
-            ("/health", 1003, false),    // Should NOT be logged
-            ("/metrics", 1004, false),   // Should NOT be logged
-            ("/api/health", 1005, true), // Should be logged (starts with /api/)
-        ];
-
-        for (uri, correlation_id, _should_log) in &test_cases {
-            let mut headers = HashMap::new();
-            headers.insert("content-type".to_string(), vec!["application/json".into()]);
-
-            let request_data = RequestData {
-                method: http::Method::GET,
-                uri: uri.parse().unwrap(),
-                headers: headers.clone(),
-                body: Some(Bytes::from(b"{}".to_vec())),
-                timestamp: SystemTime::now(),
-                correlation_id: *correlation_id,
-            };
-
-            let response_data = ResponseData {
-                correlation_id: *correlation_id,
-                status: http::StatusCode::OK,
-                headers,
-                body: Some(Bytes::from(b"{}".to_vec())),
-                timestamp: SystemTime::now(),
-                duration_to_first_byte: Duration::from_millis(80),
-                duration: Duration::from_millis(100),
-            };
-
-            handler.handle_request(request_data.clone()).await;
-            handler.handle_response(request_data, response_data).await;
-        }
-
-        // Query all requests and verify filtering worked
-        let filter = RequestFilter::default();
-        let results = repository.query(filter).await.unwrap();
-
-        // Should only have logged the /api/ requests (1001, 1002, 1005)
-        assert_eq!(results.len(), 3);
-        let logged_ids: Vec<i64> = results.iter().map(|r| r.request.correlation_id).collect();
-        assert!(logged_ids.contains(&1001));
-        assert!(logged_ids.contains(&1002));
-        assert!(logged_ids.contains(&1005));
-        assert!(!logged_ids.contains(&1003));
-        assert!(!logged_ids.contains(&1004));
-
-        // All logged requests should have corresponding responses
-        for result in &results {
-            assert!(result.response.is_some());
-        }
-    }
-
-    #[sqlx::test]
-    async fn test_path_filtering_blocked_prefix(pool: PgPool) {
-        // Run migrations first
-        crate::migrator().run(&pool).await.unwrap();
-
-        let handler = PostgresHandler::<Value, Value>::from_pool(pool.clone())
-            .await
-            .unwrap()
-            .with_path_filter(PathFilter {
-                allowed_prefixes: vec!["/api/".to_string()],
-                blocked_prefixes: vec!["/api/health".to_string(), "/api/metrics".to_string()],
-            });
-        let repository = handler.repository();
-
-        // Test requests
-        let test_cases = vec![
-            ("http://localhost/api/users", 2001, true), // Should be logged
-            ("http://localhost/api/health", 2002, false), // Should be BLOCKED
-            ("http://localhost/api/metrics", 2003, false), // Should be BLOCKED
-            ("http://localhost/api/orders", 2004, true), // Should be logged
-            ("http://localhost/health", 2005, false),   // Not in allowed prefixes
-        ];
-
-        for (uri, correlation_id, _should_log) in &test_cases {
-            let mut headers = HashMap::new();
-            headers.insert("content-type".to_string(), vec!["application/json".into()]);
-
-            let request_data = RequestData {
-                method: http::Method::GET,
-                uri: uri.parse().unwrap(),
-                headers: headers.clone(),
-                body: Some(Bytes::from(b"{}".to_vec())),
-                timestamp: SystemTime::now(),
-                correlation_id: *correlation_id,
-            };
-
-            let response_data = ResponseData {
-                correlation_id: *correlation_id,
-                status: http::StatusCode::OK,
-                headers,
-                body: Some(Bytes::from(b"{}".to_vec())),
-                timestamp: SystemTime::now(),
-                duration_to_first_byte: Duration::from_millis(80),
-                duration: Duration::from_millis(100),
-            };
-
-            handler.handle_request(request_data.clone()).await;
-            handler.handle_response(request_data, response_data).await;
-        }
-
-        // Should only have logged 2001 and 2004 (blocked prefixes take precedence)
-        let filter = RequestFilter::default();
-        let results = repository.query(filter).await.unwrap();
-
-        assert_eq!(results.len(), 2);
-        let logged_ids: Vec<i64> = results.iter().map(|r| r.request.correlation_id).collect();
-        assert!(logged_ids.contains(&2001));
-        assert!(logged_ids.contains(&2004));
-        assert!(!logged_ids.contains(&2002)); // blocked
-        assert!(!logged_ids.contains(&2003)); // blocked
-        assert!(!logged_ids.contains(&2005)); // not in allowed prefixes
-    }
+    // Note: Path filtering tests have been removed because path filtering
+    // now happens at the outlet middleware layer, not in the PostgresHandler.
+    // The handler now logs everything it receives, with filtering done upstream.
 
     #[sqlx::test]
     async fn test_no_path_filtering_logs_everything(pool: PgPool) {
