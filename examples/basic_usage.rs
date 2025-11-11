@@ -233,6 +233,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = RequestLoggerConfig {
         capture_request_body: true,
         capture_response_body: true,
+        ..Default::default()
     };
 
     // Create the logging layer

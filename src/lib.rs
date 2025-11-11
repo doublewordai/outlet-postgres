@@ -88,7 +88,8 @@ use serde_json::Value;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{debug, error, instrument};
+use std::time::SystemTime;
+use tracing::{debug, error, instrument, warn};
 use uuid::Uuid;
 
 pub mod error;
@@ -435,7 +436,15 @@ where
         if let Err(e) = result {
             error!(correlation_id = %data.correlation_id, error = %e, "Failed to insert request data");
         } else {
-            debug!(correlation_id = %data.correlation_id, "Request data inserted successfully");
+            let processing_lag_ms = SystemTime::now()
+                .duration_since(data.timestamp)
+                .unwrap_or_default()
+                .as_millis();
+            if processing_lag_ms > 1000 {
+                warn!(correlation_id = %data.correlation_id, method = %data.method, uri = %data.uri, lag_ms = %processing_lag_ms, "Request logged (slow)");
+            } else {
+                debug!(correlation_id = %data.correlation_id, method = %data.method, uri = %data.uri, lag_ms = %processing_lag_ms, "Request logged");
+            }
         }
     }
 
@@ -479,7 +488,15 @@ where
             }
             Ok(query_result) => {
                 if query_result.rows_affected() > 0 {
-                    debug!(correlation_id = %request_data.correlation_id, "Response data inserted successfully");
+                    let processing_lag_ms = SystemTime::now()
+                        .duration_since(response_data.timestamp)
+                        .unwrap_or_default()
+                        .as_millis();
+                    if processing_lag_ms > 1000 {
+                        warn!(correlation_id = %request_data.correlation_id, status = %response_data.status, duration_ms = %duration_ms, lag_ms = %processing_lag_ms, "Response logged (slow)");
+                    } else {
+                        debug!(correlation_id = %request_data.correlation_id, status = %response_data.status, duration_ms = %duration_ms, lag_ms = %processing_lag_ms, "Response logged");
+                    }
                 } else {
                     debug!(correlation_id = %request_data.correlation_id, "No matching request found for response, skipping insert")
                 }
