@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.4](https://github.com/doublewordai/outlet-postgres/compare/v0.4.3...v0.4.4) - 2025-11-27
+
+### Other
+
+- *(deps)* update rust crate chrono to v0.4.42 ([#19](https://github.com/doublewordai/outlet-postgres/pull/19))
+- *(deps)* update mozilla-actions/sccache-action action to v0.0.9 ([#15](https://github.com/doublewordai/outlet-postgres/pull/15))
+- *(deps)* update rust crate axum to v0.8.7 ([#17](https://github.com/doublewordai/outlet-postgres/pull/17))
+- Add renovate.json ([#14](https://github.com/doublewordai/outlet-postgres/pull/14))
+
 ## [0.4.3](https://github.com/doublewordai/outlet-postgres/compare/v0.4.2...v0.4.3) - 2025-11-11
 
 ### Fixed
