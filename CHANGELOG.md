@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.4](https://github.com/doublewordai/outlet-postgres/compare/v0.4.3...v0.4.4) - 2026-01-07
+
+### Added
+
+- add write duration metrics
+
+### Other
+
+- *(deps)* update rust crate sqlparser to 0.60 ([#25](https://github.com/doublewordai/outlet-postgres/pull/25))
+- *(deps)* update rust crate http to v1.4.0 ([#24](https://github.com/doublewordai/outlet-postgres/pull/24))
+- *(deps)* update rust crate serde_json to v1.0.149 ([#21](https://github.com/doublewordai/outlet-postgres/pull/21))
+- *(deps)* update actions/checkout action to v6 ([#27](https://github.com/doublewordai/outlet-postgres/pull/27))
+- *(deps)* update rust crate bytes to v1.11.0 ([#23](https://github.com/doublewordai/outlet-postgres/pull/23))
+- *(deps)* update rust crate thiserror to v2.0.17 ([#22](https://github.com/doublewordai/outlet-postgres/pull/22))
+- *(deps)* update tokio-tracing monorepo ([#29](https://github.com/doublewordai/outlet-postgres/pull/29))
+- *(deps)* update rust crate uuid to v1.19.0 ([#30](https://github.com/doublewordai/outlet-postgres/pull/30))
+- *(deps)* update rust crate chrono to v0.4.42 ([#19](https://github.com/doublewordai/outlet-postgres/pull/19))
+- *(deps)* update mozilla-actions/sccache-action action to v0.0.9 ([#15](https://github.com/doublewordai/outlet-postgres/pull/15))
+- *(deps)* update rust crate axum to v0.8.7 ([#17](https://github.com/doublewordai/outlet-postgres/pull/17))
+- Add renovate.json ([#14](https://github.com/doublewordai/outlet-postgres/pull/14))
+
 ## [0.4.3](https://github.com/doublewordai/outlet-postgres/compare/v0.4.2...v0.4.3) - 2025-11-11
 
 ### Fixed
