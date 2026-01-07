@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- *(deps)* update rust crate sqlparser to 0.60 ([#25](https://github.com/doublewordai/outlet-postgres/pull/25))
+- *(deps)* update rust crate http to v1.4.0 ([#24](https://github.com/doublewordai/outlet-postgres/pull/24))
+- *(deps)* update rust crate serde_json to v1.0.149 ([#21](https://github.com/doublewordai/outlet-postgres/pull/21))
 - *(deps)* update actions/checkout action to v6 ([#27](https://github.com/doublewordai/outlet-postgres/pull/27))
 - *(deps)* update rust crate bytes to v1.11.0 ([#23](https://github.com/doublewordai/outlet-postgres/pull/23))
 - *(deps)* update rust crate thiserror to v2.0.17 ([#22](https://github.com/doublewordai/outlet-postgres/pull/22))
