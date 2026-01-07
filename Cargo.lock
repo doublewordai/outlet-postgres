@@ -1013,9 +1013,9 @@ checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
 
 [[package]]
 name = "outlet"
-version = "0.4.2"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b71c5ba1c445cf62752a81ac699c113109bbb4bfae9f7d01c30e664537ec59d9"
+checksum = "cf1fe92691fe9a54b63b9b5e424801da9a1d1f3c7dd0b3492fcbfb1e2e1e4a98"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1023,6 +1023,7 @@ dependencies = [
  "bytes",
  "futures",
  "http-body-util",
+ "metrics",
  "pin-project-lite",
  "serde",
  "serde_json",
@@ -1752,7 +1753,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
