@@ -82,6 +82,7 @@ impl std::error::Error for SerializationError {
 }
 
 use chrono::{DateTime, Utc};
+use metrics::{counter, histogram};
 use outlet::{RequestData, RequestHandler, ResponseData};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -91,7 +92,6 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 use tracing::{debug, error, instrument, warn};
 use uuid::Uuid;
-use metrics::{counter, histogram};
 
 pub mod error;
 pub mod repository;
@@ -435,7 +435,8 @@ where
         .execute(&self.pool)
         .await;
         let query_duration = query_start.elapsed();
-        histogram!("outlet_write_duration_seconds", "operation" => "request").record(query_duration.as_secs_f64());
+        histogram!("outlet_write_duration_seconds", "operation" => "request")
+            .record(query_duration.as_secs_f64());
 
         if let Err(e) = result {
             counter!("outlet_write_errors_total", "operation" => "request").increment(1);
@@ -488,7 +489,8 @@ where
         .execute(&self.pool)
         .await;
         let query_duration = query_start.elapsed();
-        histogram!("outlet_write_duration_seconds", "operation" => "response").record(query_duration.as_secs_f64());
+        histogram!("outlet_write_duration_seconds", "operation" => "response")
+            .record(query_duration.as_secs_f64());
 
         match result {
             Err(e) => {
