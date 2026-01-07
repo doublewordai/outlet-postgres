@@ -88,9 +88,10 @@ use serde_json::Value;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 use tracing::{debug, error, instrument, warn};
 use uuid::Uuid;
+use metrics::{counter, histogram};
 
 pub mod error;
 pub mod repository;
@@ -416,6 +417,7 @@ where
 
         let timestamp: DateTime<Utc> = data.timestamp.into();
 
+        let query_start = Instant::now();
         let result = sqlx::query(
             r#"
             INSERT INTO http_requests (instance_id, correlation_id, timestamp, method, uri, headers, body, body_parsed)
@@ -432,8 +434,11 @@ where
         .bind(parsed)
         .execute(&self.pool)
         .await;
+        let query_duration = query_start.elapsed();
+        histogram!("outlet_write_duration_seconds", "operation" => "request").record(query_duration.as_secs_f64());
 
         if let Err(e) = result {
+            counter!("outlet_write_errors_total", "operation" => "request").increment(1);
             error!(correlation_id = %data.correlation_id, error = %e, "Failed to insert request data");
         } else {
             let processing_lag_ms = SystemTime::now()
@@ -463,6 +468,7 @@ where
         let duration_ms = response_data.duration.as_millis() as i64;
         let duration_to_first_byte_ms = response_data.duration_to_first_byte.as_millis() as i64;
 
+        let query_start = Instant::now();
         let result = sqlx::query(
             r#"
             INSERT INTO http_responses (instance_id, correlation_id, timestamp, status_code, headers, body, body_parsed, duration_to_first_byte_ms, duration_ms)
@@ -481,9 +487,12 @@ where
         .bind(duration_ms)
         .execute(&self.pool)
         .await;
+        let query_duration = query_start.elapsed();
+        histogram!("outlet_write_duration_seconds", "operation" => "response").record(query_duration.as_secs_f64());
 
         match result {
             Err(e) => {
+                counter!("outlet_write_errors_total", "operation" => "response").increment(1);
                 error!(correlation_id = %request_data.correlation_id, error = %e, "Failed to insert response data");
             }
             Ok(query_result) => {
