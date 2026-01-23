@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.5](https://github.com/doublewordai/outlet-postgres/compare/v0.4.4...v0.4.5) - 2026-01-23
+
+### Added
+
+- add comprehensive test coverage for read/write pool separation
+
+### Other
+
+- Merge pull request #36 from doublewordai/renovate/tower-0.x-lockfile
+- Merge pull request #37 from doublewordai/renovate/chrono-0.x-lockfile
+- Merge pull request #38 from doublewordai/renovate/thiserror-2.x-lockfile
+- add comprehensive CLAUDE.md for AI agent guidance
+- *(deps)* update rust crate tokio-test to v0.4.5 ([#32](https://github.com/doublewordai/outlet-postgres/pull/32))
+- *(deps)* update rust crate axum to v0.8.8 ([#31](https://github.com/doublewordai/outlet-postgres/pull/31))
+- *(deps)* update rust crate tokio to v1.49.0 ([#26](https://github.com/doublewordai/outlet-postgres/pull/26))
+- release v0.4.4 ([#33](https://github.com/doublewordai/outlet-postgres/pull/33))
+- cargo fmt
+
 ## [0.4.4](https://github.com/doublewordai/outlet-postgres/compare/v0.4.3...v0.4.4) - 2026-01-07
 
 ### Added
