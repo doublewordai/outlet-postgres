@@ -7,6 +7,7 @@ use axum::{
 use outlet::{RequestLoggerConfig, RequestLoggerLayer};
 use outlet_postgres::{PostgresHandler, RequestFilter, RequestRepository};
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 use tower::ServiceBuilder;
 
 // Define your API request and response types
@@ -76,7 +77,7 @@ async fn create_user(
 // Application state containing our typed repository
 #[derive(Clone)]
 struct AppState {
-    repository: RequestRepository<CreateUserRequest, ApiResponse>,
+    repository: RequestRepository<PgPool, CreateUserRequest, ApiResponse>,
 }
 
 // Query parameters for the analytics endpoints
@@ -310,7 +311,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create handler with typed request and response bodies
     // ApiResponse uses serde untagged enum to handle both CreateUserResponse and ErrorResponse
-    let handler = PostgresHandler::<CreateUserRequest, ApiResponse>::new(&database_url).await?;
+    let handler =
+        PostgresHandler::<PgPool, CreateUserRequest, ApiResponse>::new(&database_url).await?;
 
     // Get the repository from the handler and store it in app state
     let repository = handler.repository();

@@ -3,7 +3,8 @@ use chrono::{DateTime, Utc};
 use serde::de::Error;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{PgPool, QueryBuilder, Row};
+use sqlx::{QueryBuilder, Row};
+use sqlx_pool_router::PoolProvider;
 use uuid::Uuid;
 
 use crate::error::PostgresHandlerError;
@@ -236,18 +237,22 @@ impl RequestFilter {
 }
 
 #[derive(Clone)]
-pub struct RequestRepository<TReq, TRes> {
-    pool: PgPool,
+pub struct RequestRepository<P, TReq, TRes>
+where
+    P: PoolProvider,
+{
+    pool: P,
     _phantom_req: std::marker::PhantomData<TReq>,
     _phantom_res: std::marker::PhantomData<TRes>,
 }
 
-impl<TReq, TRes> RequestRepository<TReq, TRes>
+impl<P, TReq, TRes> RequestRepository<P, TReq, TRes>
 where
+    P: PoolProvider,
     TReq: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'static,
     TRes: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'static,
 {
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(pool: P) -> Self {
         Self {
             pool,
             _phantom_req: std::marker::PhantomData,
@@ -262,7 +267,7 @@ where
         let rows = filter
             .build_query()
             .build()
-            .fetch_all(&self.pool)
+            .fetch_all(self.pool.read())
             .await
             .map_err(PostgresHandlerError::Query)?;
 

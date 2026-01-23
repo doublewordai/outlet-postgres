@@ -87,7 +87,7 @@ async fn dump_responses(
         .await
         .unwrap_or(0) as u32;
 
-    let total_pages = (total_count + limit - 1) / limit;
+    let total_pages = total_count.div_ceil(limit);
 
     let pairs = sqlx::query_as::<
         _,
@@ -227,7 +227,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create PostgreSQL handler from pool
     // Using serde_json::Value as the body type for flexible JSON storage
-    let handler = PostgresHandler::<Value>::from_pool(pool.clone()).await?;
+    let handler: PostgresHandler<PgPool, Value, Value> =
+        PostgresHandler::from_pool(pool.clone()).await?;
 
     // Configure outlet to capture both request and response bodies
     let config = RequestLoggerConfig {
