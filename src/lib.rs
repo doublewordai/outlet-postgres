@@ -100,6 +100,9 @@ pub use repository::{
     HttpRequest, HttpResponse, RequestFilter, RequestRepository, RequestResponsePair,
 };
 
+// Re-export from sqlx-pool-router
+pub use sqlx_pool_router::{DbPools, PoolProvider, TestDbPools};
+
 /// Get the migrator for running outlet-postgres database migrations.
 ///
 /// This returns a SQLx migrator that can be used to set up the required
@@ -150,23 +153,27 @@ type ResponseSerializer<T> = Arc<
 /// Implements the `RequestHandler` trait to log HTTP requests and responses
 /// to PostgreSQL. Request and response bodies are serialized to JSONB fields.
 ///
-/// Generic over `TReq` and `TRes` which represent the request and response body types
-/// that should implement `Deserialize` for parsing and `Serialize` for database storage as JSONB.
+/// Generic over:
+/// - `P`: Pool provider implementing `PoolProvider` trait for read/write routing
+/// - `TReq` and `TRes`: Request and response body types for JSONB serialization
+///
 /// Use `serde_json::Value` for flexible JSON storage, or custom structs for typed storage.
 #[derive(Clone)]
-pub struct PostgresHandler<TReq = Value, TRes = Value>
+pub struct PostgresHandler<P = PgPool, TReq = Value, TRes = Value>
 where
+    P: PoolProvider,
     TReq: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'static,
     TRes: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'static,
 {
-    pool: PgPool,
+    pool: P,
     request_serializer: RequestSerializer<TReq>,
     response_serializer: ResponseSerializer<TRes>,
     instance_id: Uuid,
 }
 
-impl<TReq, TRes> PostgresHandler<TReq, TRes>
+impl<P, TReq, TRes> PostgresHandler<P, TReq, TRes>
 where
+    P: PoolProvider,
     TReq: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'static,
     TRes: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'static,
 {
@@ -191,52 +198,6 @@ where
                 let fallback_data = String::from_utf8_lossy(bytes).to_string();
                 SerializationError::new(fallback_data, error)
             })
-        })
-    }
-
-    /// Create a new PostgreSQL handler with a connection pool.
-    ///
-    /// This will connect to the database but will NOT run migrations.
-    /// Use `migrator()` to get a migrator and run migrations separately.
-    ///
-    /// # Arguments
-    ///
-    /// * `database_url` - PostgreSQL connection string
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// use outlet_postgres::{PostgresHandler, migrator};
-    /// use serde::{Deserialize, Serialize};
-    /// use serde_json::Value;
-    ///
-    /// #[derive(Deserialize, Serialize)]
-    /// struct MyBodyType {
-    ///     id: u64,
-    ///     name: String,
-    /// }
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    ///     // Run migrations first
-    ///     let pool = sqlx::PgPool::connect("postgresql://user:pass@localhost/db").await?;
-    ///     migrator().run(&pool).await?;
-    ///     
-    ///     // Create handler
-    ///     let handler = PostgresHandler::<MyBodyType, MyBodyType>::new("postgresql://user:pass@localhost/db").await?;
-    ///     Ok(())
-    /// }
-    /// ```
-    pub async fn new(database_url: &str) -> Result<Self, PostgresHandlerError> {
-        let pool = PgPool::connect(database_url)
-            .await
-            .map_err(PostgresHandlerError::Connection)?;
-
-        Ok(Self {
-            pool,
-            request_serializer: Self::default_request_serializer(),
-            response_serializer: Self::default_response_serializer(),
-            instance_id: Uuid::new_v4(),
         })
     }
 
@@ -281,20 +242,21 @@ where
         self
     }
 
-    /// Create a PostgreSQL handler from an existing connection pool.
+    /// Create a PostgreSQL handler from a pool provider.
     ///
-    /// Use this if you already have a connection pool and want to reuse it.
+    /// Use this if you want to use a custom pool provider implementation
+    /// (such as `DbPools` for read/write separation).
     /// This will NOT run migrations - use `migrator()` to run migrations separately.
     ///
     /// # Arguments
     ///
-    /// * `pool` - Existing PostgreSQL connection pool
+    /// * `pool_provider` - Pool provider implementing `PoolProvider` trait
     ///
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use outlet_postgres::{PostgresHandler, migrator};
-    /// use sqlx::PgPool;
+    /// use outlet_postgres::{PostgresHandler, DbPools, migrator};
+    /// use sqlx::postgres::PgPoolOptions;
     /// use serde::{Deserialize, Serialize};
     ///
     /// #[derive(Deserialize, Serialize)]
@@ -305,19 +267,23 @@ where
     ///
     /// #[tokio::main]
     /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    ///     let pool = PgPool::connect("postgresql://user:pass@localhost/db").await?;
-    ///     
-    ///     // Run migrations first
-    ///     migrator().run(&pool).await?;
-    ///     
-    ///     // Create handler
-    ///     let handler = PostgresHandler::<MyBodyType, MyBodyType>::from_pool(pool).await?;
+    ///     let primary = PgPoolOptions::new()
+    ///         .connect("postgresql://user:pass@primary/db").await?;
+    ///     let replica = PgPoolOptions::new()
+    ///         .connect("postgresql://user:pass@replica/db").await?;
+    ///
+    ///     // Run migrations on primary
+    ///     migrator().run(&primary).await?;
+    ///
+    ///     // Create handler with read/write separation
+    ///     let pools = DbPools::with_replica(primary, replica);
+    ///     let handler = PostgresHandler::<_, MyBodyType, MyBodyType>::from_pool_provider(pools).await?;
     ///     Ok(())
     /// }
     /// ```
-    pub async fn from_pool(pool: PgPool) -> Result<Self, PostgresHandlerError> {
+    pub async fn from_pool_provider(pool_provider: P) -> Result<Self, PostgresHandlerError> {
         Ok(Self {
-            pool,
+            pool: pool_provider,
             request_serializer: Self::default_request_serializer(),
             response_serializer: Self::default_response_serializer(),
             instance_id: Uuid::new_v4(),
@@ -395,13 +361,104 @@ where
     ///
     /// Returns a `RequestRepository` with the same type parameters as this handler,
     /// allowing for type-safe querying of request and response bodies.
-    pub fn repository(&self) -> crate::repository::RequestRepository<TReq, TRes> {
+    pub fn repository(&self) -> crate::repository::RequestRepository<P, TReq, TRes> {
         crate::repository::RequestRepository::new(self.pool.clone())
     }
 }
 
-impl<TReq, TRes> RequestHandler for PostgresHandler<TReq, TRes>
+// Backward-compatible constructors for PgPool
+impl<TReq, TRes> PostgresHandler<PgPool, TReq, TRes>
 where
+    TReq: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'static,
+    TRes: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'static,
+{
+    /// Create a new PostgreSQL handler with a connection pool.
+    ///
+    /// This will connect to the database but will NOT run migrations.
+    /// Use `migrator()` to get a migrator and run migrations separately.
+    ///
+    /// # Arguments
+    ///
+    /// * `database_url` - PostgreSQL connection string
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use outlet_postgres::{PostgresHandler, migrator};
+    /// use serde::{Deserialize, Serialize};
+    ///
+    /// #[derive(Deserialize, Serialize)]
+    /// struct MyBodyType {
+    ///     id: u64,
+    ///     name: String,
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ///     // Run migrations first
+    ///     let pool = sqlx::PgPool::connect("postgresql://user:pass@localhost/db").await?;
+    ///     migrator().run(&pool).await?;
+    ///
+    ///     // Create handler
+    ///     let handler = PostgresHandler::<_, MyBodyType, MyBodyType>::new("postgresql://user:pass@localhost/db").await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn new(database_url: &str) -> Result<Self, PostgresHandlerError> {
+        let pool = PgPool::connect(database_url)
+            .await
+            .map_err(PostgresHandlerError::Connection)?;
+
+        Ok(Self {
+            pool,
+            request_serializer: Self::default_request_serializer(),
+            response_serializer: Self::default_response_serializer(),
+            instance_id: Uuid::new_v4(),
+        })
+    }
+
+    /// Create a PostgreSQL handler from an existing connection pool.
+    ///
+    /// Use this if you already have a connection pool and want to reuse it.
+    /// This will NOT run migrations - use `migrator()` to run migrations separately.
+    ///
+    /// # Arguments
+    ///
+    /// * `pool` - Existing PostgreSQL connection pool
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use outlet_postgres::{PostgresHandler, migrator};
+    /// use sqlx::PgPool;
+    /// use serde::{Deserialize, Serialize};
+    ///
+    /// #[derive(Deserialize, Serialize)]
+    /// struct MyBodyType {
+    ///     id: u64,
+    ///     name: String,
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let pool = PgPool::connect("postgresql://user:pass@localhost/db").await?;
+    ///
+    ///     // Run migrations first
+    ///     migrator().run(&pool).await?;
+    ///
+    ///     // Create handler
+    ///     let handler = PostgresHandler::<_, MyBodyType, MyBodyType>::from_pool(pool).await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn from_pool(pool: PgPool) -> Result<Self, PostgresHandlerError> {
+        Self::from_pool_provider(pool).await
+    }
+}
+
+impl<P, TReq, TRes> RequestHandler for PostgresHandler<P, TReq, TRes>
+where
+    P: PoolProvider,
     TReq: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'static,
     TRes: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'static,
 {
@@ -432,7 +489,7 @@ where
         .bind(headers_json)
         .bind(body_json)
         .bind(parsed)
-        .execute(&self.pool)
+        .execute(self.pool.write())
         .await;
         let query_duration = query_start.elapsed();
         histogram!("outlet_write_duration_seconds", "operation" => "request")
@@ -486,7 +543,7 @@ where
         .bind(parsed)
         .bind(duration_to_first_byte_ms)
         .bind(duration_ms)
-        .execute(&self.pool)
+        .execute(self.pool.write())
         .await;
         let query_duration = query_start.elapsed();
         histogram!("outlet_write_duration_seconds", "operation" => "response")
@@ -587,7 +644,7 @@ mod tests {
         // Run migrations first
         crate::migrator().run(&pool).await.unwrap();
 
-        let handler = PostgresHandler::<TestRequest, TestResponse>::from_pool(pool.clone())
+        let handler = PostgresHandler::<PgPool, TestRequest, TestResponse>::from_pool(pool.clone())
             .await
             .unwrap();
 
@@ -605,7 +662,7 @@ mod tests {
         // Run migrations first
         crate::migrator().run(&pool).await.unwrap();
 
-        let handler = PostgresHandler::<TestRequest, TestResponse>::from_pool(pool.clone())
+        let handler = PostgresHandler::<PgPool, TestRequest, TestResponse>::from_pool(pool.clone())
             .await
             .unwrap();
         let repository = handler.repository();
@@ -659,7 +716,7 @@ mod tests {
         // Run migrations first
         crate::migrator().run(&pool).await.unwrap();
 
-        let handler = PostgresHandler::<TestRequest, TestResponse>::from_pool(pool.clone())
+        let handler = PostgresHandler::<PgPool, TestRequest, TestResponse>::from_pool(pool.clone())
             .await
             .unwrap();
         let repository = handler.repository();
@@ -712,7 +769,7 @@ mod tests {
         // Run migrations first
         crate::migrator().run(&pool).await.unwrap();
 
-        let handler = PostgresHandler::<TestRequest, TestResponse>::from_pool(pool.clone())
+        let handler = PostgresHandler::<PgPool, TestRequest, TestResponse>::from_pool(pool.clone())
             .await
             .unwrap();
         let repository = handler.repository();
@@ -758,7 +815,7 @@ mod tests {
         // Run migrations first
         crate::migrator().run(&pool).await.unwrap();
 
-        let handler = PostgresHandler::<Value, Value>::from_pool(pool.clone())
+        let handler = PostgresHandler::<PgPool, Value, Value>::from_pool(pool.clone())
             .await
             .unwrap();
         let repository = handler.repository();
@@ -847,7 +904,7 @@ mod tests {
         // Run migrations first
         crate::migrator().run(&pool).await.unwrap();
 
-        let handler = PostgresHandler::<Value, Value>::from_pool(pool.clone())
+        let handler = PostgresHandler::<PgPool, Value, Value>::from_pool(pool.clone())
             .await
             .unwrap();
         let repository = handler.repository();
@@ -905,7 +962,7 @@ mod tests {
         // Run migrations first
         crate::migrator().run(&pool).await.unwrap();
 
-        let handler = PostgresHandler::<Value, Value>::from_pool(pool.clone())
+        let handler = PostgresHandler::<PgPool, Value, Value>::from_pool(pool.clone())
             .await
             .unwrap();
         let repository = handler.repository();
@@ -965,7 +1022,7 @@ mod tests {
         // Run migrations first
         crate::migrator().run(&pool).await.unwrap();
 
-        let handler = PostgresHandler::<Value, Value>::from_pool(pool.clone())
+        let handler = PostgresHandler::<PgPool, Value, Value>::from_pool(pool.clone())
             .await
             .unwrap();
         let repository = handler.repository();
@@ -1032,12 +1089,12 @@ mod tests {
         crate::migrator().run(&pool).await.unwrap();
 
         // Handler without any path filtering
-        let handler = PostgresHandler::<Value, Value>::from_pool(pool.clone())
+        let handler = PostgresHandler::<PgPool, Value, Value>::from_pool(pool.clone())
             .await
             .unwrap();
         let repository = handler.repository();
 
-        let test_uris = vec!["/api/users", "/health", "/metrics", "/random/path"];
+        let test_uris = ["/api/users", "/health", "/metrics", "/random/path"];
         for (i, uri) in test_uris.iter().enumerate() {
             let correlation_id = 3000 + i as u64;
             let mut headers = HashMap::new();
@@ -1059,5 +1116,202 @@ mod tests {
         let filter = RequestFilter::default();
         let results = repository.query(filter).await.unwrap();
         assert_eq!(results.len(), 4);
+    }
+
+    // Tests for read/write pool separation using TestDbPools
+    #[sqlx::test]
+    async fn test_write_operations_use_write_pool(pool: PgPool) {
+        // Run migrations first
+        crate::migrator().run(&pool).await.unwrap();
+
+        // Create TestDbPools which has a read-only replica
+        let test_pools = crate::TestDbPools::new(pool).await.unwrap();
+        let handler = PostgresHandler::<_, Value, Value>::from_pool_provider(test_pools.clone())
+            .await
+            .unwrap();
+
+        let mut request_data = create_test_request_data();
+        let correlation_id = 5001;
+        request_data.correlation_id = correlation_id;
+
+        // This should succeed because handle_request uses .write() which goes to primary
+        handler.handle_request(request_data.clone()).await;
+
+        // Verify the write succeeded by reading from the primary pool
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM http_requests WHERE correlation_id = $1")
+                .bind(correlation_id as i64)
+                .fetch_one(test_pools.write())
+                .await
+                .unwrap();
+
+        assert_eq!(count, 1, "Request should be written to primary pool");
+    }
+
+    #[sqlx::test]
+    async fn test_response_write_uses_write_pool(pool: PgPool) {
+        // Run migrations first
+        crate::migrator().run(&pool).await.unwrap();
+
+        let test_pools = crate::TestDbPools::new(pool).await.unwrap();
+        let handler = PostgresHandler::<_, Value, Value>::from_pool_provider(test_pools.clone())
+            .await
+            .unwrap();
+
+        let mut request_data = create_test_request_data();
+        let mut response_data = create_test_response_data();
+        let correlation_id = 5002;
+        request_data.correlation_id = correlation_id;
+        response_data.correlation_id = correlation_id;
+
+        // Write request first
+        handler.handle_request(request_data.clone()).await;
+
+        // Write response - should succeed because it uses .write()
+        handler.handle_response(request_data, response_data).await;
+
+        // Verify both were written
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM http_responses WHERE correlation_id = $1")
+                .bind(correlation_id as i64)
+                .fetch_one(test_pools.write())
+                .await
+                .unwrap();
+
+        assert_eq!(count, 1, "Response should be written to primary pool");
+    }
+
+    #[sqlx::test]
+    async fn test_repository_queries_use_read_pool(pool: PgPool) {
+        // Run migrations first
+        crate::migrator().run(&pool).await.unwrap();
+
+        let test_pools = crate::TestDbPools::new(pool).await.unwrap();
+        let handler = PostgresHandler::<_, Value, Value>::from_pool_provider(test_pools.clone())
+            .await
+            .unwrap();
+
+        // Write some data using the handler (which uses write pool)
+        let mut request_data = create_test_request_data();
+        let correlation_id = 5003;
+        request_data.correlation_id = correlation_id;
+        handler.handle_request(request_data).await;
+
+        // Query using repository - should succeed because it uses .read()
+        let repository = handler.repository();
+        let filter = RequestFilter {
+            correlation_id: Some(correlation_id as i64),
+            ..Default::default()
+        };
+
+        // This will succeed if repository.query() correctly uses .read()
+        let results = repository.query(filter).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].request.correlation_id, correlation_id as i64);
+    }
+
+    #[sqlx::test]
+    async fn test_replica_pool_rejects_writes(pool: PgPool) {
+        // Run migrations first
+        crate::migrator().run(&pool).await.unwrap();
+
+        let test_pools = crate::TestDbPools::new(pool).await.unwrap();
+
+        // Verify that the replica pool is actually read-only
+        let result = sqlx::query("INSERT INTO http_requests (instance_id, correlation_id, timestamp, method, uri, headers, body, body_parsed) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)")
+            .bind(Uuid::new_v4())
+            .bind(9999i64)
+            .bind(Utc::now())
+            .bind("GET")
+            .bind("/test")
+            .bind(serde_json::json!({}))
+            .bind(None::<Value>)
+            .bind(false)
+            .execute(test_pools.read())
+            .await;
+
+        // Should fail with a read-only transaction error
+        assert!(
+            result.is_err(),
+            "Replica pool should reject write operations"
+        );
+
+        let err = result.unwrap_err();
+        let err_msg = err.to_string().to_lowercase();
+        assert!(
+            err_msg.contains("read-only") || err_msg.contains("read only"),
+            "Error should mention read-only: {}",
+            err
+        );
+    }
+
+    #[sqlx::test]
+    async fn test_full_request_response_cycle_with_read_write_separation(pool: PgPool) {
+        // Run migrations first
+        crate::migrator().run(&pool).await.unwrap();
+
+        let test_pools = crate::TestDbPools::new(pool).await.unwrap();
+        let handler =
+            PostgresHandler::<_, TestRequest, TestResponse>::from_pool_provider(test_pools)
+                .await
+                .unwrap();
+
+        let mut request_data = create_test_request_data();
+        let mut response_data = create_test_response_data();
+        let correlation_id = 5004;
+        request_data.correlation_id = correlation_id;
+        response_data.correlation_id = correlation_id;
+
+        // Write request and response (uses write pool)
+        handler.handle_request(request_data.clone()).await;
+        handler.handle_response(request_data, response_data).await;
+
+        // Query back using repository (uses read pool)
+        let repository = handler.repository();
+        let filter = RequestFilter {
+            correlation_id: Some(correlation_id as i64),
+            ..Default::default()
+        };
+
+        let results = repository.query(filter).await.unwrap();
+        assert_eq!(results.len(), 1);
+
+        // Verify request data
+        let pair = &results[0];
+        assert_eq!(pair.request.correlation_id, correlation_id as i64);
+        assert_eq!(pair.request.method, "POST");
+        assert_eq!(pair.request.uri, "/api/users");
+
+        // Verify response data
+        let response = pair.response.as_ref().expect("Response should exist");
+        assert_eq!(response.correlation_id, correlation_id as i64);
+        assert_eq!(response.status_code, 201);
+
+        // Verify parsed bodies
+        match &pair.request.body {
+            Some(Ok(parsed_body)) => {
+                assert_eq!(
+                    *parsed_body,
+                    TestRequest {
+                        user_id: 123,
+                        action: "create_user".to_string(),
+                    }
+                );
+            }
+            _ => panic!("Expected successfully parsed request body"),
+        }
+
+        match &response.body {
+            Some(Ok(parsed_body)) => {
+                assert_eq!(
+                    *parsed_body,
+                    TestResponse {
+                        success: true,
+                        message: "User created successfully".to_string(),
+                    }
+                );
+            }
+            _ => panic!("Expected successfully parsed response body"),
+        }
     }
 }
