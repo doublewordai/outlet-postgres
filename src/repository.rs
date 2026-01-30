@@ -249,8 +249,6 @@ where
 impl<P, TReq, TRes> RequestRepository<P, TReq, TRes>
 where
     P: PoolProvider,
-    TReq: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'static,
-    TRes: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'static,
 {
     pub fn new(pool: P) -> Self {
         Self {
@@ -259,7 +257,15 @@ where
             _phantom_res: std::marker::PhantomData,
         }
     }
+}
 
+impl<P, TReq, TRes> RequestRepository<P, TReq, TRes>
+where
+    P: PoolProvider,
+    for<'c> &'c P::Pool: sqlx::Executor<'c, Database = sqlx::Postgres>,
+    TReq: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'static,
+    TRes: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'static,
+{
     pub async fn query(
         &self,
         filter: RequestFilter,

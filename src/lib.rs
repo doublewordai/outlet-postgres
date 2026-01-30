@@ -459,6 +459,7 @@ where
 impl<P, TReq, TRes> RequestHandler for PostgresHandler<P, TReq, TRes>
 where
     P: PoolProvider,
+    for<'c> &'c P::Pool: sqlx::Executor<'c, Database = sqlx::Postgres>,
     TReq: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'static,
     TRes: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'static,
 {
