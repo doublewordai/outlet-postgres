@@ -10,7 +10,7 @@ categories = ["web-programming", "database"]
 authors = ["fergus.finn@doubleword.ai"]
 
 [dependencies]
-outlet = "0.4.4"
+outlet = { path = "../outlet" }
 sqlx-pool-router = { version = "0.2.0" }
 tokio = { version = "1.0", features = ["full"] }
 sqlx = { version = "0.8", features = [
