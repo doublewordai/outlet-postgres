@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.7](https://github.com/doublewordai/outlet-postgres/compare/v0.4.6...v0.4.7) - 2026-02-26
+
+### Fixed
+
+- *(deps)* update rust crate outlet to 0.6.0
+
+### Other
+
+- *(deps)* update rust crate url to v2.5.8 ([#40](https://github.com/doublewordai/outlet-postgres/pull/40))
+- *(deps)* update rust crate tracing-test to v0.2.6 ([#50](https://github.com/doublewordai/outlet-postgres/pull/50))
+- *(deps)* update rust crate sqlparser to 0.61 ([#51](https://github.com/doublewordai/outlet-postgres/pull/51))
+- *(deps)* update rust crate chrono to v0.4.44 ([#52](https://github.com/doublewordai/outlet-postgres/pull/52))
+- *(deps)* update rust crate bytes to v1.11.1 ([#49](https://github.com/doublewordai/outlet-postgres/pull/49))
+
 ## [0.4.6](https://github.com/doublewordai/outlet-postgres/compare/v0.4.5...v0.4.6) - 2026-02-02
 
 ### Other
