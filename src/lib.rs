@@ -462,7 +462,7 @@ where
     TReq: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'static,
     TRes: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'static,
 {
-    #[instrument(skip(self, data), fields(correlation_id = %data.correlation_id))]
+    #[instrument(name = "outlet.handle_request", skip(self, data), fields(correlation_id = %data.correlation_id))]
     async fn handle_request(&self, data: RequestData) {
         let headers_json = Self::headers_to_json(&data.headers);
         let (body_json, parsed) = if data.body.is_some() {
@@ -511,7 +511,7 @@ where
         }
     }
 
-    #[instrument(skip(self, request_data, response_data), fields(correlation_id = %request_data.correlation_id))]
+    #[instrument(name = "outlet.handle_response", skip(self, request_data, response_data), fields(correlation_id = %request_data.correlation_id))]
     async fn handle_response(&self, request_data: RequestData, response_data: ResponseData) {
         let headers_json = Self::headers_to_json(&response_data.headers);
         let (body_json, parsed) = if response_data.body.is_some() {
