@@ -1006,8 +1006,6 @@ dependencies = [
 [[package]]
 name = "outlet"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cbce3e5e96355b32b60f5490d75d53889c8446480eca3a16320030c8f3af703b"
 dependencies = [
  "anyhow",
  "axum",
