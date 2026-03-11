@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/doublewordai/outlet-postgres/compare/v0.4.8...v0.5.0) - 2026-03-11
+
+### Added
+
+- add trace_id/span_id columns for DB→Tempo correlation ([#63](https://github.com/doublewordai/outlet-postgres/pull/63))
+- partition tables by timestamp for time-based retention ([#61](https://github.com/doublewordai/outlet-postgres/pull/61))
+
+### Other
+
+- *(deps)* update rust crate tokio to v1.50.0 ([#55](https://github.com/doublewordai/outlet-postgres/pull/55))
+- *(deps)* update rust crate uuid to v1.22.0 ([#56](https://github.com/doublewordai/outlet-postgres/pull/56))
+
 ## [0.4.8](https://github.com/doublewordai/outlet-postgres/compare/v0.4.7...v0.4.8) - 2026-03-11
 
 ### Added
