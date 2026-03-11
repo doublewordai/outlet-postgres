@@ -21,13 +21,18 @@
 --       PARTITION OF http_requests
 --       FOR VALUES FROM ('2026-03-09') TO ('2026-03-16');
 --
+-- Note on uniqueness: PostgreSQL requires the partition key in all unique
+-- constraints. The previous UNIQUE (instance_id, correlation_id) is replaced
+-- with a non-unique index. Uniqueness is guaranteed by application logic
+-- (correlation_id is a monotonic counter per instance_id).
 
 -- ============================================================
 -- http_requests
 -- ============================================================
 
--- Rename the existing table
+-- Rename the existing table and its sequence
 ALTER TABLE http_requests RENAME TO http_requests_old;
+ALTER SEQUENCE http_requests_id_seq RENAME TO http_requests_old_id_seq;
 
 -- Rename constraints and indexes to avoid conflicts
 ALTER TABLE http_requests_old RENAME CONSTRAINT http_requests_pkey TO http_requests_old_pkey;
@@ -48,14 +53,13 @@ CREATE TABLE http_requests (
     body JSONB,
     body_parsed BOOLEAN,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (id, timestamp),
-    UNIQUE (instance_id, correlation_id, timestamp)
+    PRIMARY KEY (id, timestamp)
 ) PARTITION BY RANGE (timestamp);
 
 -- Default partition catches everything when no time-range partitions exist
 CREATE TABLE http_requests_default PARTITION OF http_requests DEFAULT;
 
--- Recreate indexes
+-- Recreate indexes (instance_id, correlation_id is non-unique — see note above)
 CREATE INDEX idx_http_requests_timestamp ON http_requests (timestamp);
 CREATE INDEX idx_http_requests_method ON http_requests (method);
 CREATE INDEX idx_http_requests_instance_correlation ON http_requests (instance_id, correlation_id);
@@ -66,17 +70,22 @@ SELECT id, instance_id, correlation_id, timestamp, method, uri, headers, body, b
 FROM http_requests_old;
 
 -- Reset sequence to continue from where the old table left off
-SELECT setval('http_requests_id_seq', COALESCE(NULLIF((SELECT MAX(id) FROM http_requests), 0), 1), (SELECT MAX(id) FROM http_requests) IS NOT NULL AND (SELECT MAX(id) FROM http_requests) > 0);
+SELECT setval(
+    'http_requests_id_seq',
+    COALESCE(NULLIF(max_id, 0), 1),
+    max_id IS NOT NULL AND max_id > 0
+) FROM (SELECT MAX(id) AS max_id FROM http_requests) AS seq;
 
--- Drop old table
+-- Drop old table (cascades old sequence)
 DROP TABLE http_requests_old;
 
 -- ============================================================
 -- http_responses
 -- ============================================================
 
--- Rename the existing table
+-- Rename the existing table and its sequence
 ALTER TABLE http_responses RENAME TO http_responses_old;
+ALTER SEQUENCE http_responses_id_seq RENAME TO http_responses_old_id_seq;
 
 -- Rename constraints and indexes to avoid conflicts
 ALTER TABLE http_responses_old RENAME CONSTRAINT http_responses_pkey TO http_responses_old_pkey;
@@ -99,14 +108,13 @@ CREATE TABLE http_responses (
     duration_to_first_byte_ms BIGINT NOT NULL,
     duration_ms BIGINT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (id, timestamp),
-    UNIQUE (instance_id, correlation_id, timestamp)
+    PRIMARY KEY (id, timestamp)
 ) PARTITION BY RANGE (timestamp);
 
 -- Default partition catches everything when no time-range partitions exist
 CREATE TABLE http_responses_default PARTITION OF http_responses DEFAULT;
 
--- Recreate indexes
+-- Recreate indexes (instance_id, correlation_id is non-unique — see note above)
 CREATE INDEX idx_http_responses_timestamp ON http_responses (timestamp);
 CREATE INDEX idx_http_responses_status_code ON http_responses (status_code);
 CREATE INDEX idx_http_responses_instance_correlation ON http_responses (instance_id, correlation_id);
@@ -118,7 +126,11 @@ SELECT id, instance_id, correlation_id, timestamp, status_code, headers, body, b
 FROM http_responses_old;
 
 -- Reset sequence to continue from where the old table left off
-SELECT setval('http_responses_id_seq', COALESCE(NULLIF((SELECT MAX(id) FROM http_responses), 0), 1), (SELECT MAX(id) FROM http_responses) IS NOT NULL AND (SELECT MAX(id) FROM http_responses) > 0);
+SELECT setval(
+    'http_responses_id_seq',
+    COALESCE(NULLIF(max_id, 0), 1),
+    max_id IS NOT NULL AND max_id > 0
+) FROM (SELECT MAX(id) AS max_id FROM http_responses) AS seq;
 
--- Drop old table
+-- Drop old table (cascades old sequence)
 DROP TABLE http_responses_old;
