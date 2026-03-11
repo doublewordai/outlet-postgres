@@ -20,6 +20,8 @@ pub struct HttpRequest<TReq> {
     pub headers: Value,
     pub body: Option<Result<TReq, Bytes>>,
     pub created_at: DateTime<Utc>,
+    pub trace_id: Option<String>,
+    pub span_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -70,6 +72,7 @@ impl RequestFilter {
             SELECT 
                 r.id as req_id, r.instance_id as req_instance_id, r.correlation_id as req_correlation_id, r.timestamp as req_timestamp, 
                 r.method, r.uri, r.headers as req_headers, r.body as req_body, r.body_parsed as req_body_parsed, r.created_at as req_created_at,
+                r.trace_id, r.span_id,
                 res.id as res_id, res.instance_id as res_instance_id, res.correlation_id as res_correlation_id, res.timestamp as res_timestamp,
                 res.status_code, res.headers as res_headers, res.body as res_body, res.body_parsed as res_body_parsed, res.duration_to_first_byte_ms, res.duration_ms, res.created_at as res_created_at
             FROM http_requests r
@@ -308,6 +311,8 @@ where
                 headers: row.get("req_headers"),
                 body: request_body,
                 created_at: row.get("req_created_at"),
+                trace_id: row.try_get("trace_id").unwrap_or(None),
+                span_id: row.try_get("span_id").unwrap_or(None),
             };
 
             let response = if let Ok(res_id) = row.try_get::<Option<i64>, _>("res_id") {
