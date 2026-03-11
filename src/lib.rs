@@ -477,8 +477,8 @@ where
         let query_start = Instant::now();
         let result = sqlx::query(
             r#"
-            INSERT INTO http_requests (instance_id, correlation_id, timestamp, method, uri, headers, body, body_parsed)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            INSERT INTO http_requests (instance_id, correlation_id, timestamp, method, uri, headers, body, body_parsed, trace_id, span_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
         )
         .bind(self.instance_id)
@@ -489,6 +489,8 @@ where
         .bind(headers_json)
         .bind(body_json)
         .bind(parsed)
+        .bind(&data.trace_id)
+        .bind(&data.span_id)
         .execute(self.pool.write())
         .await;
         let query_duration = query_start.elapsed();
@@ -615,6 +617,8 @@ mod tests {
             body: Some(Bytes::from(body)),
             timestamp: SystemTime::now(),
             correlation_id: 0,
+            trace_id: None,
+            span_id: None,
         }
     }
 
@@ -787,6 +791,8 @@ mod tests {
             body: Some(Bytes::from(invalid_json_body.to_vec())),
             timestamp: SystemTime::now(),
             correlation_id,
+            trace_id: None,
+            span_id: None,
         };
 
         handler.handle_request(request_data).await;
@@ -839,6 +845,8 @@ mod tests {
                 body: Some(Bytes::from(b"{}".to_vec())),
                 timestamp: SystemTime::now(),
                 correlation_id,
+                trace_id: None,
+                span_id: None,
             };
 
             let response_data = ResponseData {
@@ -925,6 +933,8 @@ mod tests {
                 body: Some(Bytes::from(format!("{{\"id\": {i}}}").into_bytes())),
                 timestamp,
                 correlation_id,
+                trace_id: None,
+                span_id: None,
             };
 
             handler.handle_request(request_data).await;
@@ -983,6 +993,8 @@ mod tests {
             headers,
             body: None,
             timestamp: SystemTime::now(),
+            trace_id: None,
+            span_id: None,
         };
 
         let correlation_id = 3000;
@@ -1045,6 +1057,8 @@ mod tests {
                 body: None,
                 timestamp: *timestamp,
                 correlation_id,
+                trace_id: None,
+                span_id: None,
             };
 
             handler.handle_request(request_data).await;
@@ -1107,6 +1121,8 @@ mod tests {
                 body: Some(Bytes::from(b"{}".to_vec())),
                 timestamp: SystemTime::now(),
                 correlation_id,
+                trace_id: None,
+                span_id: None,
             };
 
             handler.handle_request(request_data).await;
