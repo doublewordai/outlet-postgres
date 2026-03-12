@@ -573,6 +573,157 @@ where
             }
         }
     }
+
+    #[instrument(name = "outlet.handle_request_batch", skip(self, batch), fields(batch_size = batch.len()))]
+    async fn handle_request_batch(&self, batch: &[RequestData]) {
+        if batch.is_empty() {
+            return;
+        }
+
+        let len = batch.len();
+        let mut instance_ids = Vec::with_capacity(len);
+        let mut correlation_ids = Vec::with_capacity(len);
+        let mut timestamps = Vec::with_capacity(len);
+        let mut methods = Vec::with_capacity(len);
+        let mut uris = Vec::with_capacity(len);
+        let mut headers_col: Vec<Value> = Vec::with_capacity(len);
+        let mut bodies: Vec<Option<Value>> = Vec::with_capacity(len);
+        let mut body_parsed_col = Vec::with_capacity(len);
+        let mut trace_ids: Vec<Option<String>> = Vec::with_capacity(len);
+        let mut span_ids: Vec<Option<String>> = Vec::with_capacity(len);
+
+        for data in batch {
+            instance_ids.push(self.instance_id);
+            correlation_ids.push(data.correlation_id as i64);
+            timestamps.push(DateTime::<Utc>::from(data.timestamp));
+            methods.push(data.method.to_string());
+            uris.push(data.uri.to_string());
+            headers_col.push(Self::headers_to_json(&data.headers));
+
+            let (body_json, parsed) = if data.body.is_some() {
+                let (json, parsed) = self.request_body_to_json_with_fallback(data);
+                (Some(json), parsed)
+            } else {
+                (None, false)
+            };
+            bodies.push(body_json);
+            body_parsed_col.push(parsed);
+            trace_ids.push(data.trace_id.clone());
+            span_ids.push(data.span_id.clone());
+        }
+
+        let query_start = Instant::now();
+        let result = sqlx::query(
+            r#"
+            INSERT INTO http_requests (instance_id, correlation_id, timestamp, method, uri, headers, body, body_parsed, trace_id, span_id)
+            SELECT * FROM UNNEST($1::uuid[], $2::bigint[], $3::timestamptz[], $4::varchar[], $5::text[], $6::jsonb[], $7::jsonb[], $8::boolean[], $9::varchar[], $10::varchar[])
+            "#,
+        )
+        .bind(&instance_ids)
+        .bind(&correlation_ids)
+        .bind(&timestamps)
+        .bind(&methods)
+        .bind(&uris)
+        .bind(&headers_col)
+        .bind(&bodies)
+        .bind(&body_parsed_col)
+        .bind(&trace_ids)
+        .bind(&span_ids)
+        .execute(self.pool.write())
+        .await;
+        let query_duration = query_start.elapsed();
+        histogram!("outlet_write_duration_seconds", "operation" => "request_batch")
+            .record(query_duration.as_secs_f64());
+
+        match result {
+            Ok(r) => {
+                debug!(
+                    rows = r.rows_affected(),
+                    duration_ms = query_duration.as_millis() as u64,
+                    "Request batch inserted"
+                );
+            }
+            Err(e) => {
+                counter!("outlet_write_errors_total", "operation" => "request_batch").increment(1);
+                error!(batch_size = len, error = %e, "Failed to bulk insert request batch");
+            }
+        }
+    }
+
+    #[instrument(name = "outlet.handle_response_batch", skip(self, batch), fields(batch_size = batch.len()))]
+    async fn handle_response_batch(&self, batch: &[(RequestData, ResponseData)]) {
+        if batch.is_empty() {
+            return;
+        }
+
+        let len = batch.len();
+        let mut instance_ids = Vec::with_capacity(len);
+        let mut correlation_ids = Vec::with_capacity(len);
+        let mut timestamps = Vec::with_capacity(len);
+        let mut status_codes = Vec::with_capacity(len);
+        let mut headers_col: Vec<Value> = Vec::with_capacity(len);
+        let mut bodies: Vec<Option<Value>> = Vec::with_capacity(len);
+        let mut body_parsed_col = Vec::with_capacity(len);
+        let mut duration_to_first_byte_ms_col = Vec::with_capacity(len);
+        let mut duration_ms_col = Vec::with_capacity(len);
+
+        for (request_data, response_data) in batch {
+            instance_ids.push(self.instance_id);
+            correlation_ids.push(request_data.correlation_id as i64);
+            timestamps.push(DateTime::<Utc>::from(response_data.timestamp));
+            status_codes.push(response_data.status.as_u16() as i32);
+            headers_col.push(Self::headers_to_json(&response_data.headers));
+
+            let (body_json, parsed) = if response_data.body.is_some() {
+                let (json, parsed) =
+                    self.response_body_to_json_with_fallback(request_data, response_data);
+                (Some(json), parsed)
+            } else {
+                (None, false)
+            };
+            bodies.push(body_json);
+            body_parsed_col.push(parsed);
+            duration_to_first_byte_ms_col
+                .push(response_data.duration_to_first_byte.as_millis() as i64);
+            duration_ms_col.push(response_data.duration.as_millis() as i64);
+        }
+
+        let query_start = Instant::now();
+        let result = sqlx::query(
+            r#"
+            INSERT INTO http_responses (instance_id, correlation_id, timestamp, status_code, headers, body, body_parsed, duration_to_first_byte_ms, duration_ms)
+            SELECT * FROM UNNEST($1::uuid[], $2::bigint[], $3::timestamptz[], $4::int[], $5::jsonb[], $6::jsonb[], $7::boolean[], $8::bigint[], $9::bigint[])
+            "#,
+        )
+        .bind(&instance_ids)
+        .bind(&correlation_ids)
+        .bind(&timestamps)
+        .bind(&status_codes)
+        .bind(&headers_col)
+        .bind(&bodies)
+        .bind(&body_parsed_col)
+        .bind(&duration_to_first_byte_ms_col)
+        .bind(&duration_ms_col)
+        .execute(self.pool.write())
+        .await;
+        let query_duration = query_start.elapsed();
+        histogram!("outlet_write_duration_seconds", "operation" => "response_batch")
+            .record(query_duration.as_secs_f64());
+
+        match result {
+            Ok(r) => {
+                debug!(
+                    rows = r.rows_affected(),
+                    duration_ms = query_duration.as_millis() as u64,
+                    "Response batch inserted"
+                );
+            }
+            Err(e) => {
+                counter!("outlet_write_errors_total", "operation" => "response_batch").increment(1);
+                error!(batch_size = len, error = %e, "Failed to bulk insert response batch");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1329,5 +1480,149 @@ mod tests {
             }
             _ => panic!("Expected successfully parsed response body"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Batch INSERT tests
+    // -----------------------------------------------------------------------
+
+    #[sqlx::test]
+    async fn test_request_batch_insert(pool: PgPool) {
+        crate::migrator().run(&pool).await.unwrap();
+        let handler = PostgresHandler::<PgPool, TestRequest, TestResponse>::from_pool(pool.clone())
+            .await
+            .unwrap();
+
+        let mut batch = Vec::new();
+        for i in 0..5 {
+            let mut req = create_test_request_data();
+            req.correlation_id = 1000 + i;
+            req.uri = format!("/api/batch/{i}").parse().unwrap();
+            batch.push(req);
+        }
+
+        handler.handle_request_batch(&batch).await;
+
+        // Verify all 5 rows were inserted
+        let count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM http_requests WHERE correlation_id BETWEEN 1000 AND 1004",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count.0, 5);
+    }
+
+    #[sqlx::test]
+    async fn test_response_batch_insert(pool: PgPool) {
+        crate::migrator().run(&pool).await.unwrap();
+        let handler = PostgresHandler::<PgPool, TestRequest, TestResponse>::from_pool(pool.clone())
+            .await
+            .unwrap();
+
+        // Insert matching requests first
+        let mut pairs = Vec::new();
+        for i in 0..3 {
+            let mut req = create_test_request_data();
+            req.correlation_id = 2000 + i;
+            handler.handle_request(req.clone()).await;
+
+            let mut res = create_test_response_data();
+            res.correlation_id = 2000 + i;
+            pairs.push((req, res));
+        }
+
+        handler.handle_response_batch(&pairs).await;
+
+        // Verify all 3 response rows were inserted
+        let count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM http_responses WHERE correlation_id BETWEEN 2000 AND 2002",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count.0, 3);
+    }
+
+    #[sqlx::test]
+    async fn test_batch_with_mixed_bodies(pool: PgPool) {
+        crate::migrator().run(&pool).await.unwrap();
+        let handler = PostgresHandler::<PgPool, TestRequest, TestResponse>::from_pool(pool.clone())
+            .await
+            .unwrap();
+
+        let mut batch = Vec::new();
+
+        // Request with body
+        let mut req_with_body = create_test_request_data();
+        req_with_body.correlation_id = 3000;
+        batch.push(req_with_body);
+
+        // Request without body
+        let mut req_no_body = create_test_request_data();
+        req_no_body.correlation_id = 3001;
+        req_no_body.body = None;
+        batch.push(req_no_body);
+
+        // Request with unparseable body
+        let mut req_bad_body = create_test_request_data();
+        req_bad_body.correlation_id = 3002;
+        req_bad_body.body = Some(Bytes::from("not valid json"));
+        batch.push(req_bad_body);
+
+        handler.handle_request_batch(&batch).await;
+
+        // All 3 should be inserted
+        let count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM http_requests WHERE correlation_id BETWEEN 3000 AND 3002",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count.0, 3);
+
+        // Check body_parsed flags
+        let rows: Vec<(i64, Option<bool>)> = sqlx::query_as(
+            "SELECT correlation_id, body_parsed FROM http_requests WHERE correlation_id BETWEEN 3000 AND 3002 ORDER BY correlation_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(rows[0].1, Some(true)); // parsed JSON
+        assert_eq!(rows[1].1, Some(false)); // no body
+        assert_eq!(rows[2].1, Some(false)); // fallback string
+    }
+
+    #[sqlx::test]
+    async fn test_empty_batch_is_noop(pool: PgPool) {
+        crate::migrator().run(&pool).await.unwrap();
+        let handler = PostgresHandler::<PgPool, TestRequest, TestResponse>::from_pool(pool.clone())
+            .await
+            .unwrap();
+
+        // Should not error
+        handler.handle_request_batch(&[]).await;
+        handler.handle_response_batch(&[]).await;
+    }
+
+    #[sqlx::test]
+    async fn test_batch_write_uses_write_pool(pool: PgPool) {
+        use sqlx_pool_router::TestDbPools;
+        crate::migrator().run(&pool).await.unwrap();
+        let test_pools = TestDbPools::new(pool).await.unwrap();
+        let handler =
+            PostgresHandler::<TestDbPools, TestRequest, TestResponse>::from_pool_provider(
+                test_pools,
+            )
+            .await
+            .unwrap();
+
+        let mut req = create_test_request_data();
+        req.correlation_id = 4000;
+        handler.handle_request_batch(&[req.clone()]).await;
+
+        let res = create_test_response_data();
+        handler.handle_response_batch(&[(req, res)]).await;
     }
 }
