@@ -1019,9 +1019,9 @@ dependencies = [
 
 [[package]]
 name = "outlet"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "912fa05ac7da27693b4ed09ddd23ab5500709ab0ccb8cfa4fe555ddcfed620ae"
+checksum = "bc2267a2dcdc06dc06dc701bd768ee9b6ca9f12567094477898c1d8108e9b407"
 dependencies = [
  "anyhow",
  "axum",
@@ -1043,7 +1043,7 @@ dependencies = [
 
 [[package]]
 name = "outlet-postgres"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "axum",
  "base64",
@@ -1784,7 +1784,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1](https://github.com/doublewordai/outlet-postgres/compare/v0.5.0...v0.5.1) - 2026-03-12
+
+### Added
+
+- bulk INSERT via UNNEST for batch dispatch ([#65](https://github.com/doublewordai/outlet-postgres/pull/65))
+
+### Other
+
+- release v0.5.0 ([#62](https://github.com/doublewordai/outlet-postgres/pull/62))
+
 ## [0.5.0](https://github.com/doublewordai/outlet-postgres/compare/v0.4.8...v0.5.0) - 2026-03-11
 
 ### Added
