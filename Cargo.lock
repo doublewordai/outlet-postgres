@@ -1018,9 +1018,9 @@ dependencies = [
 
 [[package]]
 name = "outlet"
-version = "0.8.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc2267a2dcdc06dc06dc701bd768ee9b6ca9f12567094477898c1d8108e9b407"
+checksum = "105438f773ecf29bc835501af0d89220f6ae3f7a98a3da14ad58cf2c45d3fdb4"
 dependencies = [
  "anyhow",
  "axum",
@@ -1953,14 +1953,15 @@ dependencies = [
 
 [[package]]
 name = "tower-http"
-version = "0.6.6"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "adc82fd73de2a9722ac5da747f12383d2bfdb93591ee6c58486e0097890f05f2"
+checksum = "b11f75e912b0c2be01b63d8cf8057b8c3f97cf34abb3d431a3a4c8675498e233"
 dependencies = [
  "bitflags",
  "bytes",
  "http",
  "http-body",
+ "percent-encoding",
  "pin-project-lite",
  "tower-layer",
  "tower-service",

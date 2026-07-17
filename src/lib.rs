@@ -791,6 +791,7 @@ mod tests {
             duration_to_first_byte: Duration::from_millis(100),
             duration: Duration::from_millis(150),
             correlation_id: 0,
+            extensions: Default::default(),
         }
     }
 
@@ -1008,6 +1009,7 @@ mod tests {
                 timestamp: SystemTime::now(),
                 duration_to_first_byte: Duration::from_millis(duration_ms / 2),
                 duration: Duration::from_millis(duration_ms),
+                extensions: Default::default(),
             };
 
             handler.handle_request(request_data.clone()).await;
