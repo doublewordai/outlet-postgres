@@ -1019,8 +1019,7 @@ dependencies = [
 [[package]]
 name = "outlet"
 version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "105438f773ecf29bc835501af0d89220f6ae3f7a98a3da14ad58cf2c45d3fdb4"
+source = "git+https://github.com/doublewordai/outlet?rev=6206a0bedc0c9a5d1ad77b837ec334642d06eea8#6206a0bedc0c9a5d1ad77b837ec334642d06eea8"
 dependencies = [
  "anyhow",
  "axum",
