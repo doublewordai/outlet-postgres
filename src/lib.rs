@@ -93,8 +93,11 @@ use std::time::{Instant, SystemTime};
 use tracing::{debug, error, instrument, warn};
 use uuid::Uuid;
 
+mod capture;
 pub mod error;
 pub mod repository;
+pub use capture::CapturePolicy;
+use capture::{PreparedRequest, PreparedResponse};
 pub use error::PostgresHandlerError;
 pub use repository::{
     HttpRequest, HttpResponse, RequestFilter, RequestRepository, RequestResponsePair,
@@ -169,6 +172,7 @@ where
     request_serializer: RequestSerializer<TReq>,
     response_serializer: ResponseSerializer<TRes>,
     instance_id: Uuid,
+    capture_policy: CapturePolicy,
 }
 
 impl<P, TReq, TRes> PostgresHandler<P, TReq, TRes>
@@ -242,6 +246,13 @@ where
         self
     }
 
+    /// Configure the headers and opaque subject identifier made available to
+    /// serializers and persistent storage.
+    pub fn with_capture_policy(mut self, policy: CapturePolicy) -> Self {
+        self.capture_policy = policy;
+        self
+    }
+
     /// Create a PostgreSQL handler from a pool provider.
     ///
     /// Use this if you want to use a custom pool provider implementation
@@ -287,6 +298,7 @@ where
             request_serializer: Self::default_request_serializer(),
             response_serializer: Self::default_response_serializer(),
             instance_id: Uuid::new_v4(),
+            capture_policy: CapturePolicy::default(),
         })
     }
 
@@ -414,6 +426,7 @@ where
             request_serializer: Self::default_request_serializer(),
             response_serializer: Self::default_response_serializer(),
             instance_id: Uuid::new_v4(),
+            capture_policy: CapturePolicy::default(),
         })
     }
 
@@ -464,6 +477,7 @@ where
 {
     #[instrument(name = "outlet.handle_request", skip(self, data), fields(correlation_id = %data.correlation_id))]
     async fn handle_request(&self, data: RequestData) {
+        let PreparedRequest { data, subject_id } = self.capture_policy.prepare_request(data);
         let headers_json = Self::headers_to_json(&data.headers);
         let (body_json, parsed) = if data.body.is_some() {
             let (json, parsed) = self.request_body_to_json_with_fallback(&data);
@@ -477,8 +491,8 @@ where
         let query_start = Instant::now();
         let result = sqlx::query(
             r#"
-            INSERT INTO http_requests (instance_id, correlation_id, timestamp, method, uri, headers, body, body_parsed, trace_id, span_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            INSERT INTO http_requests (instance_id, correlation_id, timestamp, method, uri, headers, body, body_parsed, trace_id, span_id, subject_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             "#,
         )
         .bind(self.instance_id)
@@ -491,6 +505,7 @@ where
         .bind(parsed)
         .bind(&data.trace_id)
         .bind(&data.span_id)
+        .bind(subject_id)
         .execute(self.pool.write())
         .await;
         let query_duration = query_start.elapsed();
@@ -515,6 +530,13 @@ where
 
     #[instrument(name = "outlet.handle_response", skip(self, request_data, response_data), fields(correlation_id = %request_data.correlation_id))]
     async fn handle_response(&self, request_data: RequestData, response_data: ResponseData) {
+        let PreparedResponse {
+            request: request_data,
+            response: response_data,
+            subject_id,
+        } = self
+            .capture_policy
+            .prepare_response(request_data, response_data);
         let headers_json = Self::headers_to_json(&response_data.headers);
         let (body_json, parsed) = if response_data.body.is_some() {
             let (json, parsed) =
@@ -531,8 +553,8 @@ where
         let query_start = Instant::now();
         let result = sqlx::query(
             r#"
-            INSERT INTO http_responses (instance_id, correlation_id, timestamp, status_code, headers, body, body_parsed, duration_to_first_byte_ms, duration_ms)
-            SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9
+            INSERT INTO http_responses (instance_id, correlation_id, timestamp, status_code, headers, body, body_parsed, duration_to_first_byte_ms, duration_ms, subject_id)
+            SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
             WHERE EXISTS (SELECT 1 FROM http_requests WHERE instance_id = $1 AND correlation_id = $2)
             "#,
         )
@@ -545,6 +567,7 @@ where
         .bind(parsed)
         .bind(duration_to_first_byte_ms)
         .bind(duration_ms)
+        .bind(subject_id)
         .execute(self.pool.write())
         .await;
         let query_duration = query_start.elapsed();
@@ -591,8 +614,11 @@ where
         let mut body_parsed_col = Vec::with_capacity(len);
         let mut trace_ids: Vec<Option<String>> = Vec::with_capacity(len);
         let mut span_ids: Vec<Option<String>> = Vec::with_capacity(len);
+        let mut subject_ids: Vec<Option<String>> = Vec::with_capacity(len);
 
         for data in batch {
+            let PreparedRequest { data, subject_id } =
+                self.capture_policy.prepare_request(data.clone());
             instance_ids.push(self.instance_id);
             correlation_ids.push(data.correlation_id as i64);
             timestamps.push(DateTime::<Utc>::from(data.timestamp));
@@ -601,7 +627,7 @@ where
             headers_col.push(Self::headers_to_json(&data.headers));
 
             let (body_json, parsed) = if data.body.is_some() {
-                let (json, parsed) = self.request_body_to_json_with_fallback(data);
+                let (json, parsed) = self.request_body_to_json_with_fallback(&data);
                 (Some(json), parsed)
             } else {
                 (None, false)
@@ -610,13 +636,14 @@ where
             body_parsed_col.push(parsed);
             trace_ids.push(data.trace_id.clone());
             span_ids.push(data.span_id.clone());
+            subject_ids.push(subject_id);
         }
 
         let query_start = Instant::now();
         let result = sqlx::query(
             r#"
-            INSERT INTO http_requests (instance_id, correlation_id, timestamp, method, uri, headers, body, body_parsed, trace_id, span_id)
-            SELECT * FROM UNNEST($1::uuid[], $2::bigint[], $3::timestamptz[], $4::varchar[], $5::text[], $6::jsonb[], $7::jsonb[], $8::boolean[], $9::varchar[], $10::varchar[])
+            INSERT INTO http_requests (instance_id, correlation_id, timestamp, method, uri, headers, body, body_parsed, trace_id, span_id, subject_id)
+            SELECT * FROM UNNEST($1::uuid[], $2::bigint[], $3::timestamptz[], $4::varchar[], $5::text[], $6::jsonb[], $7::jsonb[], $8::boolean[], $9::varchar[], $10::varchar[], $11::text[])
             "#,
         )
         .bind(&instance_ids)
@@ -629,6 +656,7 @@ where
         .bind(&body_parsed_col)
         .bind(&trace_ids)
         .bind(&span_ids)
+        .bind(&subject_ids)
         .execute(self.pool.write())
         .await;
         let query_duration = query_start.elapsed();
@@ -666,8 +694,16 @@ where
         let mut body_parsed_col = Vec::with_capacity(len);
         let mut duration_to_first_byte_ms_col = Vec::with_capacity(len);
         let mut duration_ms_col = Vec::with_capacity(len);
+        let mut subject_ids: Vec<Option<String>> = Vec::with_capacity(len);
 
         for (request_data, response_data) in batch {
+            let PreparedResponse {
+                request: request_data,
+                response: response_data,
+                subject_id,
+            } = self
+                .capture_policy
+                .prepare_response(request_data.clone(), response_data.clone());
             instance_ids.push(self.instance_id);
             correlation_ids.push(request_data.correlation_id as i64);
             timestamps.push(DateTime::<Utc>::from(response_data.timestamp));
@@ -676,7 +712,7 @@ where
 
             let (body_json, parsed) = if response_data.body.is_some() {
                 let (json, parsed) =
-                    self.response_body_to_json_with_fallback(request_data, response_data);
+                    self.response_body_to_json_with_fallback(&request_data, &response_data);
                 (Some(json), parsed)
             } else {
                 (None, false)
@@ -686,13 +722,14 @@ where
             duration_to_first_byte_ms_col
                 .push(response_data.duration_to_first_byte.as_millis() as i64);
             duration_ms_col.push(response_data.duration.as_millis() as i64);
+            subject_ids.push(subject_id);
         }
 
         let query_start = Instant::now();
         let result = sqlx::query(
             r#"
-            INSERT INTO http_responses (instance_id, correlation_id, timestamp, status_code, headers, body, body_parsed, duration_to_first_byte_ms, duration_ms)
-            SELECT * FROM UNNEST($1::uuid[], $2::bigint[], $3::timestamptz[], $4::int[], $5::jsonb[], $6::jsonb[], $7::boolean[], $8::bigint[], $9::bigint[])
+            INSERT INTO http_responses (instance_id, correlation_id, timestamp, status_code, headers, body, body_parsed, duration_to_first_byte_ms, duration_ms, subject_id)
+            SELECT * FROM UNNEST($1::uuid[], $2::bigint[], $3::timestamptz[], $4::int[], $5::jsonb[], $6::jsonb[], $7::boolean[], $8::bigint[], $9::bigint[], $10::text[])
             "#,
         )
         .bind(&instance_ids)
@@ -704,6 +741,7 @@ where
         .bind(&body_parsed_col)
         .bind(&duration_to_first_byte_ms_col)
         .bind(&duration_ms_col)
+        .bind(&subject_ids)
         .execute(self.pool.write())
         .await;
         let query_duration = query_start.elapsed();
@@ -792,6 +830,271 @@ mod tests {
             duration: Duration::from_millis(150),
             correlation_id: 0,
             extensions: Default::default(),
+        }
+    }
+
+    fn request_with_headers(
+        headers: impl IntoIterator<Item = (&'static str, &'static str)>,
+    ) -> RequestData {
+        let mut request = create_test_request_data();
+        request.headers = headers
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), vec![Bytes::from_static(value.as_bytes())]))
+            .collect();
+        request
+    }
+
+    fn response_with_headers(
+        headers: impl IntoIterator<Item = (&'static str, &'static str)>,
+    ) -> ResponseData {
+        let mut response = create_test_response_data();
+        response.headers = headers
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), vec![Bytes::from_static(value.as_bytes())]))
+            .collect();
+        response
+    }
+
+    #[sqlx::test]
+    async fn capture_policy_sanitises_request_columns_and_serializer_input(pool: PgPool) {
+        crate::migrator().run(&pool).await.unwrap();
+        let handler = PostgresHandler::<_, Value, Value>::from_pool(pool.clone())
+            .await
+            .unwrap()
+            .with_request_serializer(|request| {
+                Ok(serde_json::json!({
+                    "has_authorization": request.headers.contains_key("authorization"),
+                    "has_content_type": request.headers.contains_key("content-type"),
+                }))
+            })
+            .with_capture_policy(
+                CapturePolicy::allow_headers(["content-type"])
+                    .unwrap()
+                    .with_subject_header("x-capture-subject")
+                    .unwrap(),
+            );
+
+        handler
+            .handle_request(request_with_headers([
+                ("authorization", "Bearer must-not-persist"),
+                ("x-capture-subject", "subject-7"),
+                ("content-type", "application/json"),
+            ]))
+            .await;
+
+        let (headers, body, subject_id): (Value, Value, Option<String>) =
+            sqlx::query_as("SELECT headers, body, subject_id FROM http_requests LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            headers,
+            serde_json::json!({"content-type":"application/json"})
+        );
+        assert_eq!(body["has_authorization"], false);
+        assert_eq!(body["has_content_type"], true);
+        assert_eq!(subject_id.as_deref(), Some("subject-7"));
+        assert!(!body.to_string().contains("must-not-persist"));
+
+        let pairs = handler
+            .repository()
+            .query_by_subject_id("subject-7", RequestFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(pairs.len(), 1);
+        let non_matching = handler
+            .repository()
+            .query_by_subject_id("subject-other", RequestFilter::default())
+            .await
+            .unwrap();
+        assert!(non_matching.is_empty());
+    }
+
+    #[sqlx::test]
+    async fn capture_policy_sanitises_response_and_both_serializer_inputs(pool: PgPool) {
+        crate::migrator().run(&pool).await.unwrap();
+        let handler = PostgresHandler::<_, Value, Value>::from_pool(pool.clone())
+            .await
+            .unwrap()
+            .with_response_serializer(|request, response| {
+                Ok(serde_json::json!({
+                    "request_has_authorization": request.headers.contains_key("authorization"),
+                    "request_has_content_type": request.headers.contains_key("content-type"),
+                    "response_has_set_cookie": response.headers.contains_key("set-cookie"),
+                    "response_has_cache_control": response.headers.contains_key("cache-control"),
+                }))
+            })
+            .with_capture_policy(
+                CapturePolicy::all()
+                    .with_request_headers(["content-type"])
+                    .unwrap()
+                    .with_response_headers(["cache-control"])
+                    .unwrap()
+                    .with_subject_header("x-capture-subject")
+                    .unwrap(),
+            );
+        let mut request = request_with_headers([
+            ("authorization", "Bearer must-not-persist"),
+            ("x-capture-subject", "subject-8"),
+            ("content-type", "application/json"),
+        ]);
+        let mut response = response_with_headers([
+            ("set-cookie", "session=must-not-persist"),
+            ("cache-control", "no-store"),
+        ]);
+        request.correlation_id = 8;
+        response.correlation_id = 8;
+
+        handler.handle_request(request.clone()).await;
+        handler.handle_response(request, response).await;
+
+        let (headers, body, subject_id): (Value, Value, Option<String>) =
+            sqlx::query_as("SELECT headers, body, subject_id FROM http_responses LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(headers, serde_json::json!({"cache-control":"no-store"}));
+        assert_eq!(body["request_has_authorization"], false);
+        assert_eq!(body["request_has_content_type"], true);
+        assert_eq!(body["response_has_set_cookie"], false);
+        assert_eq!(body["response_has_cache_control"], true);
+        assert_eq!(subject_id.as_deref(), Some("subject-8"));
+        assert!(!body.to_string().contains("must-not-persist"));
+
+        let pairs = handler
+            .repository()
+            .query_by_subject_id("subject-8", RequestFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(pairs.len(), 1);
+        assert!(pairs[0].response.is_some());
+    }
+
+    #[sqlx::test]
+    async fn batch_capture_policy_sanitises_requests_and_attributes_subjects(pool: PgPool) {
+        crate::migrator().run(&pool).await.unwrap();
+        let handler = PostgresHandler::<_, Value, Value>::from_pool(pool.clone())
+            .await
+            .unwrap()
+            .with_request_serializer(|request| {
+                Ok(serde_json::json!({
+                    "has_authorization": request.headers.contains_key("authorization"),
+                    "has_content_type": request.headers.contains_key("content-type"),
+                }))
+            })
+            .with_capture_policy(
+                CapturePolicy::allow_headers(["content-type"])
+                    .unwrap()
+                    .with_subject_header("x-capture-subject")
+                    .unwrap(),
+            );
+        let mut first = request_with_headers([
+            ("authorization", "Bearer first-secret"),
+            ("x-capture-subject", "subject-1"),
+            ("content-type", "application/json"),
+        ]);
+        let mut second = request_with_headers([
+            ("authorization", "Bearer second-secret"),
+            ("x-capture-subject", "subject-2"),
+            ("content-type", "application/json"),
+        ]);
+        first.correlation_id = 101;
+        second.correlation_id = 102;
+
+        handler.handle_request_batch(&[first, second]).await;
+
+        let rows: Vec<(i64, Value, Value, Option<String>)> = sqlx::query_as(
+            "SELECT correlation_id, headers, body, subject_id FROM http_requests ORDER BY correlation_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        for (index, (correlation_id, headers, body, subject_id)) in rows.iter().enumerate() {
+            assert_eq!(*correlation_id, 101 + index as i64);
+            assert_eq!(
+                headers,
+                &serde_json::json!({"content-type":"application/json"})
+            );
+            assert_eq!(body["has_authorization"], false);
+            assert_eq!(body["has_content_type"], true);
+            assert_eq!(
+                subject_id.as_deref(),
+                Some(format!("subject-{}", index + 1).as_str())
+            );
+        }
+    }
+
+    #[sqlx::test]
+    async fn batch_capture_policy_sanitises_responses_and_attributes_subjects(pool: PgPool) {
+        crate::migrator().run(&pool).await.unwrap();
+        let handler = PostgresHandler::<_, Value, Value>::from_pool(pool.clone())
+            .await
+            .unwrap()
+            .with_response_serializer(|request, response| {
+                Ok(serde_json::json!({
+                    "request_has_authorization": request.headers.contains_key("authorization"),
+                    "response_has_set_cookie": response.headers.contains_key("set-cookie"),
+                    "response_has_cache_control": response.headers.contains_key("cache-control"),
+                }))
+            })
+            .with_capture_policy(
+                CapturePolicy::all()
+                    .with_request_headers(["content-type"])
+                    .unwrap()
+                    .with_response_headers(["cache-control"])
+                    .unwrap()
+                    .with_subject_header("x-capture-subject")
+                    .unwrap(),
+            );
+        let mut first_request = request_with_headers([
+            ("authorization", "Bearer first-secret"),
+            ("x-capture-subject", "subject-1"),
+            ("content-type", "application/json"),
+        ]);
+        let mut second_request = request_with_headers([
+            ("authorization", "Bearer second-secret"),
+            ("x-capture-subject", "subject-2"),
+            ("content-type", "application/json"),
+        ]);
+        let mut first_response = response_with_headers([
+            ("set-cookie", "first-secret"),
+            ("cache-control", "no-store"),
+        ]);
+        let mut second_response = response_with_headers([
+            ("set-cookie", "second-secret"),
+            ("cache-control", "no-store"),
+        ]);
+        first_request.correlation_id = 201;
+        first_response.correlation_id = 201;
+        second_request.correlation_id = 202;
+        second_response.correlation_id = 202;
+        let requests = [first_request.clone(), second_request.clone()];
+        let pairs = [
+            (first_request, first_response),
+            (second_request, second_response),
+        ];
+
+        handler.handle_request_batch(&requests).await;
+        handler.handle_response_batch(&pairs).await;
+
+        let rows: Vec<(i64, Value, Value, Option<String>)> = sqlx::query_as(
+            "SELECT correlation_id, headers, body, subject_id FROM http_responses ORDER BY correlation_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        for (index, (correlation_id, headers, body, subject_id)) in rows.iter().enumerate() {
+            assert_eq!(*correlation_id, 201 + index as i64);
+            assert_eq!(headers, &serde_json::json!({"cache-control":"no-store"}));
+            assert_eq!(body["request_has_authorization"], false);
+            assert_eq!(body["response_has_set_cookie"], false);
+            assert_eq!(body["response_has_cache_control"], true);
+            assert_eq!(
+                subject_id.as_deref(),
+                Some(format!("subject-{}", index + 1).as_str())
+            );
         }
     }
 

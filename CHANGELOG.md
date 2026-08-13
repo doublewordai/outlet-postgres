@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- add configurable header allowlists and opaque subject attribution for privacy-aware capture
+
 ## [0.6.0](https://github.com/doublewordai/outlet-postgres/compare/v0.5.1...v0.6.0) - 2026-07-17
 
 ### Added

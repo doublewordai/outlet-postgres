@@ -24,7 +24,7 @@ Basic usage:
 
 ```rust
 use outlet::{RequestLoggerLayer, RequestLoggerConfig};
-use outlet_postgres::PostgresHandler;
+use outlet_postgres::{CapturePolicy, PostgresHandler};
 use axum::{routing::get, Router};
 use tower::ServiceBuilder;
 
@@ -35,7 +35,11 @@ async fn hello() -> &'static str {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let database_url = "postgresql://user:password@localhost/dbname";
-    let handler = PostgresHandler::new(database_url).await?;
+    let capture_policy = CapturePolicy::allow_headers(["content-type", "user-agent"])?
+        .with_subject_header("x-application-subject")?;
+    let handler = PostgresHandler::new(database_url)
+        .await?
+        .with_capture_policy(capture_policy);
     let layer = RequestLoggerLayer::new(RequestLoggerConfig::default(), handler);
 
     let app = Router::new()
@@ -60,6 +64,7 @@ The handler automatically creates two tables:
 - `method` - HTTP method (GET, POST, etc.)
 - `uri` - Full request URI
 - `headers` - Request headers as JSONB
+- `subject_id` - Optional opaque application subject for targeted lifecycle operations
 - `body` - Request body as JSONB (optional)
 - `body_parsed` - Whether the body was parsed as the supplied JSON-serde type (default `serde_json::Value`) or not. If not, the `body` field is the base64-encoded binary data.
 - `created_at` - When the record was inserted
@@ -71,6 +76,7 @@ The handler automatically creates two tables:
 - `timestamp` - When the response was sent
 - `status_code` - HTTP status code
 - `headers` - Response headers as JSONB
+- `subject_id` - Optional opaque application subject copied from the request
 - `body` - Response body as JSONB (optional)
 - `body_parsed` - Whether the body was parsed as the supplied JSON-serde type (default `serde_json::Value`) or not. If not, the `body` field is the base64-encoded binary data.
 - `duration_ms` - Request processing time in milliseconds
@@ -78,7 +84,7 @@ The handler automatically creates two tables:
 
 ## Configuration
 
-You can control what data is captured using `RequestLoggerConfig`:
+Use `RequestLoggerConfig` to control body capture in the middleware:
 
 ```rust
 use outlet::RequestLoggerConfig;
@@ -98,6 +104,34 @@ let config = RequestLoggerConfig {
     capture_response_body: false,
 };
 ```
+
+Use `CapturePolicy` to limit which headers reach serializers and PostgreSQL:
+
+```rust
+use outlet_postgres::CapturePolicy;
+
+let capture_policy = CapturePolicy::allow_headers([
+    "content-type",
+    "user-agent",
+])?
+.with_subject_header("x-application-subject")?;
+
+let handler = PostgresHandler::new(database_url)
+    .await?
+    .with_capture_policy(capture_policy);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Prefer an allowlist for sensitive traffic. Header matching is case-insensitive,
+and retained names are stored in lowercase. The optional subject value must be
+an opaque identifier. Its carrier header is removed unless it is also present
+in the request allowlist. The same sanitized data is supplied to custom body
+serializers, preventing them from persisting filtered headers inside `body`.
+
+`CapturePolicy::all()` is the backwards-compatible default. The subject columns
+are nullable, and the migration intentionally does not create subject indexes.
+Existing installations can add suitable indexes separately using their normal
+online migration process.
 
 ## Example Queries
 

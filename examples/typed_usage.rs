@@ -5,7 +5,7 @@ use axum::{
     Json, Router,
 };
 use outlet::{RequestLoggerConfig, RequestLoggerLayer};
-use outlet_postgres::{PostgresHandler, RequestFilter, RequestRepository};
+use outlet_postgres::{CapturePolicy, PostgresHandler, RequestFilter, RequestRepository};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tower::ServiceBuilder;
@@ -311,8 +311,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create handler with typed request and response bodies
     // ApiResponse uses serde untagged enum to handle both CreateUserResponse and ErrorResponse
-    let handler =
-        PostgresHandler::<PgPool, CreateUserRequest, ApiResponse>::new(&database_url).await?;
+    let capture_policy = CapturePolicy::allow_headers(["content-type", "user-agent"])?
+        .with_subject_header("x-application-subject")?;
+    let handler = PostgresHandler::<PgPool, CreateUserRequest, ApiResponse>::new(&database_url)
+        .await?
+        .with_capture_policy(capture_policy);
 
     // Get the repository from the handler and store it in app state
     let repository = handler.repository();

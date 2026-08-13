@@ -67,6 +67,13 @@ pub struct RequestFilter {
 
 impl RequestFilter {
     pub fn build_query(&self) -> QueryBuilder<'_, sqlx::Postgres> {
+        self.build_query_with_subject(None)
+    }
+
+    fn build_query_with_subject<'a>(
+        &'a self,
+        subject_id: Option<&'a str>,
+    ) -> QueryBuilder<'a, sqlx::Postgres> {
         let mut query = QueryBuilder::new(
             r#"
             SELECT 
@@ -97,6 +104,17 @@ impl RequestFilter {
             }
             query.push("r.correlation_id = ");
             query.push_bind(correlation_id);
+        }
+
+        if let Some(subject_id) = subject_id {
+            if where_added {
+                query.push(" AND ");
+            } else {
+                query.push(" WHERE ");
+                where_added = true;
+            }
+            query.push("r.subject_id = ");
+            query.push_bind(subject_id);
         }
 
         if let Some(method) = &self.method {
@@ -267,8 +285,26 @@ where
         &self,
         filter: RequestFilter,
     ) -> Result<Vec<RequestResponsePair<TReq, TRes>>, PostgresHandlerError> {
+        self.query_with_optional_subject(filter, None).await
+    }
+
+    /// Query request/response pairs attributed to an exact opaque subject.
+    pub async fn query_by_subject_id(
+        &self,
+        subject_id: &str,
+        filter: RequestFilter,
+    ) -> Result<Vec<RequestResponsePair<TReq, TRes>>, PostgresHandlerError> {
+        self.query_with_optional_subject(filter, Some(subject_id))
+            .await
+    }
+
+    async fn query_with_optional_subject(
+        &self,
+        filter: RequestFilter,
+        subject_id: Option<&str>,
+    ) -> Result<Vec<RequestResponsePair<TReq, TRes>>, PostgresHandlerError> {
         let rows = filter
-            .build_query()
+            .build_query_with_subject(subject_id)
             .build()
             .fetch_all(self.pool.read())
             .await
@@ -403,6 +439,16 @@ mod tests {
 
         validate_sql(sql).unwrap();
         assert!(sql.contains("WHERE r.correlation_id = $1"));
+    }
+
+    #[test]
+    fn test_subject_id_filter() {
+        let filter = RequestFilter::default();
+        let query = filter.build_query_with_subject(Some("subject-1"));
+        let sql = query.sql();
+
+        validate_sql(sql).unwrap();
+        assert!(sql.contains("WHERE r.subject_id = $1"));
     }
 
     #[test]
