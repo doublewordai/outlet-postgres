@@ -20,4 +20,12 @@ pub enum PostgresHandlerError {
     /// JSON serialization error.
     #[error("JSON serialization failed: {0}")]
     Json(#[from] serde_json::Error),
+
+    /// Caller supplied an unsafe or unsupported maintenance value.
+    #[error("Invalid maintenance argument: {0}")]
+    InvalidMaintenanceArgument(String),
+
+    /// A partition operation could not prove that the requested action was safe.
+    #[error("Unsafe partition maintenance operation: {0}")]
+    UnsafePartitionOperation(String),
 }

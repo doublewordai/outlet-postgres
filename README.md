@@ -133,6 +133,73 @@ are nullable, and the migration intentionally does not create subject indexes.
 Existing installations can add suitable indexes separately using their normal
 online migration process.
 
+## Retention maintenance
+
+`RetentionRepository` provides bounded building blocks; it does not choose a
+retention period or start a scheduler. Applications remain responsible for
+leadership, cadence, policy selection, retrying while `has_more` is true, and
+recording their own evidence.
+
+Targeted subject deletion writes a one-way subject tombstone before removing
+rows. Attributed request and response capture serialize against that tombstone,
+so a late in-flight write cannot recreate data after erasure. Tombstones never
+contain the original subject value.
+
+```rust
+use chrono::{NaiveDate, Utc};
+use outlet_postgres::{BatchSize, LogTable, MaintenanceTimeouts, RetentionRepository};
+
+# async fn maintain(pool: sqlx::PgPool, application_cutoff: chrono::DateTime<Utc>) -> Result<(), Box<dyn std::error::Error>> {
+let retention = RetentionRepository::new(pool);
+let batch = BatchSize::new(1_000)?;
+
+// Run this online before relying on deadline-bound subject erasure. It covers
+// existing range and default partitions as well as newly managed partitions.
+retention
+    .ensure_subject_indexes_concurrently(MaintenanceTimeouts::default())
+    .await?;
+
+loop {
+    let progress = retention.delete_before_batch(application_cutoff, batch).await?;
+    if progress.complete() {
+        break;
+    }
+}
+
+// Pre-create a future UTC day before writes can enter that range.
+let future_day = NaiveDate::from_ymd_opt(2030, 1, 1).unwrap();
+retention
+    .ensure_daily_partitions(future_day, MaintenanceTimeouts::default())
+    .await?;
+
+// Inspection uses catalog estimates and an indexed oldest-row lookup rather
+// than an exact count of the default partition.
+let state = retention
+    .inspect_default_partition(LogTable::Requests, application_cutoff)
+    .await?;
+# Ok(())
+# }
+```
+
+Subject deletion and time deletion remove request and response pages in one
+transaction and return aggregate counts, high-watermarks, and continuation
+state. New managed daily partitions receive partial subject indexes. Existing
+range and default partitions are covered by the explicit online index
+maintenance step above; run it and verify every returned outcome before
+enabling deadline-bound subject erasure.
+
+Create future partitions before their lower bound. PostgreSQL will reject a
+new range when the default child already contains overlapping rows. Attaching
+a range while a default child exists can also lock and scan that child while
+PostgreSQL proves the ranges do not overlap. For a large default partition,
+drain the target range first and use a deliberately small maintenance timeout;
+installations may instead use their normal operator-managed constraint and
+partition-attachment process. Use `prune_default_before_batch` to drain
+eligible legacy rows in small transactions. `drop_daily_partitions` is intentionally stricter and
+irreversible: it only detaches and drops a child whose derived name and catalog
+bounds exactly match the requested UTC day and whose upper bound is not newer
+than the supplied cutoff.
+
 ## Example Queries
 
 Once you're logging requests, you can query the data:

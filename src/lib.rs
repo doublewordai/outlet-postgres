@@ -86,7 +86,7 @@ use metrics::{counter, histogram};
 use outlet::{RequestData, RequestHandler, ResponseData};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
@@ -96,11 +96,18 @@ use uuid::Uuid;
 mod capture;
 pub mod error;
 pub mod repository;
+pub mod retention;
 pub use capture::CapturePolicy;
 use capture::{PreparedRequest, PreparedResponse};
 pub use error::PostgresHandlerError;
 pub use repository::{
     HttpRequest, HttpResponse, RequestFilter, RequestRepository, RequestResponsePair,
+};
+pub use retention::{
+    BatchSize, DailyDropOutcome, DailyPartitionOutcome, DefaultPartitionState, DeletionProgress,
+    DropPartitionOutcome, EnsurePartitionOutcome, LogTable, MaintenanceOptions,
+    MaintenanceTimeouts, PartitionInfo, RetentionRepository, SubjectIndexOutcome,
+    SubjectIndexStatus, SubjectPresence, TableDeletionProgress,
 };
 
 // Re-export from sqlx-pool-router
@@ -469,6 +476,34 @@ where
     }
 }
 
+async fn lock_capture_subjects(
+    transaction: &mut Transaction<'_, Postgres>,
+    fingerprints: impl IntoIterator<Item = Vec<u8>>,
+) -> Result<(), sqlx::Error> {
+    let mut fingerprints: Vec<Vec<u8>> = fingerprints.into_iter().collect();
+    fingerprints.sort_unstable();
+    fingerprints.dedup();
+    if fingerprints.is_empty() {
+        return Ok(());
+    }
+    // This is deliberately a separate command from the tombstone check and
+    // content insert. Under READ COMMITTED, the following command receives a
+    // fresh snapshot after any exclusive erasure lock we waited on commits.
+    sqlx::query(
+        "WITH ordered AS MATERIALIZED ( \
+             SELECT fingerprint FROM UNNEST($1::bytea[]) AS fingerprint \
+             ORDER BY fingerprint \
+         ) \
+         SELECT pg_advisory_xact_lock_shared( \
+             hashtextextended('outlet-subject-erasure:' || encode(fingerprint, 'hex'), 0) \
+         ) FROM ordered",
+    )
+    .bind(fingerprints)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 impl<P, TReq, TRes> RequestHandler for PostgresHandler<P, TReq, TRes>
 where
     P: PoolProvider,
@@ -478,6 +513,7 @@ where
     #[instrument(name = "outlet.handle_request", skip(self, data), fields(correlation_id = %data.correlation_id))]
     async fn handle_request(&self, data: RequestData) {
         let PreparedRequest { data, subject_id } = self.capture_policy.prepare_request(data);
+        let subject_fingerprint = subject_id.as_deref().map(retention::subject_fingerprint);
         let headers_json = Self::headers_to_json(&data.headers);
         let (body_json, parsed) = if data.body.is_some() {
             let (json, parsed) = self.request_body_to_json_with_fallback(&data);
@@ -489,24 +525,36 @@ where
         let timestamp: DateTime<Utc> = data.timestamp.into();
 
         let query_start = Instant::now();
-        let result = sqlx::query(
-            r#"
+        let result = async {
+            let mut transaction = self.pool.write().begin().await?;
+            lock_capture_subjects(&mut transaction, subject_fingerprint.iter().cloned()).await?;
+            let result = sqlx::query(
+                r#"
             INSERT INTO http_requests (instance_id, correlation_id, timestamp, method, uri, headers, body, body_parsed, trace_id, span_id, subject_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+            WHERE $12::bytea IS NULL OR NOT EXISTS (
+                SELECT 1 FROM subject_capture_state
+                WHERE subject_fingerprint = $12
+            )
             "#,
-        )
-        .bind(self.instance_id)
-        .bind(data.correlation_id as i64)
-        .bind(timestamp)
-        .bind(data.method.to_string())
-        .bind(data.uri.to_string())
-        .bind(headers_json)
-        .bind(body_json)
-        .bind(parsed)
-        .bind(&data.trace_id)
-        .bind(&data.span_id)
-        .bind(subject_id)
-        .execute(self.pool.write())
+            )
+            .bind(self.instance_id)
+            .bind(data.correlation_id as i64)
+            .bind(timestamp)
+            .bind(data.method.to_string())
+            .bind(data.uri.to_string())
+            .bind(headers_json)
+            .bind(body_json)
+            .bind(parsed)
+            .bind(&data.trace_id)
+            .bind(&data.span_id)
+            .bind(&subject_id)
+            .bind(subject_fingerprint)
+            .execute(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
+            Ok::<_, sqlx::Error>(result)
+        }
         .await;
         let query_duration = query_start.elapsed();
         histogram!("outlet_write_duration_seconds", "operation" => "request")
@@ -537,6 +585,7 @@ where
         } = self
             .capture_policy
             .prepare_response(request_data, response_data);
+        let subject_fingerprint = subject_id.as_deref().map(retention::subject_fingerprint);
         let headers_json = Self::headers_to_json(&response_data.headers);
         let (body_json, parsed) = if response_data.body.is_some() {
             let (json, parsed) =
@@ -551,24 +600,36 @@ where
         let duration_to_first_byte_ms = response_data.duration_to_first_byte.as_millis() as i64;
 
         let query_start = Instant::now();
-        let result = sqlx::query(
-            r#"
+        let result = async {
+            let mut transaction = self.pool.write().begin().await?;
+            lock_capture_subjects(&mut transaction, subject_fingerprint.iter().cloned()).await?;
+            let result = sqlx::query(
+                r#"
             INSERT INTO http_responses (instance_id, correlation_id, timestamp, status_code, headers, body, body_parsed, duration_to_first_byte_ms, duration_ms, subject_id)
             SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
             WHERE EXISTS (SELECT 1 FROM http_requests WHERE instance_id = $1 AND correlation_id = $2)
+              AND ($11::bytea IS NULL OR NOT EXISTS (
+                  SELECT 1 FROM subject_capture_state
+                  WHERE subject_fingerprint = $11
+              ))
             "#,
-        )
-        .bind(self.instance_id)
-        .bind(request_data.correlation_id as i64)
-        .bind(timestamp)
-        .bind(response_data.status.as_u16() as i32)
-        .bind(headers_json)
-        .bind(body_json)
-        .bind(parsed)
-        .bind(duration_to_first_byte_ms)
-        .bind(duration_ms)
-        .bind(subject_id)
-        .execute(self.pool.write())
+            )
+            .bind(self.instance_id)
+            .bind(request_data.correlation_id as i64)
+            .bind(timestamp)
+            .bind(response_data.status.as_u16() as i32)
+            .bind(headers_json)
+            .bind(body_json)
+            .bind(parsed)
+            .bind(duration_to_first_byte_ms)
+            .bind(duration_ms)
+            .bind(&subject_id)
+            .bind(subject_fingerprint)
+            .execute(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
+            Ok::<_, sqlx::Error>(result)
+        }
         .await;
         let query_duration = query_start.elapsed();
         histogram!("outlet_write_duration_seconds", "operation" => "response")
@@ -615,6 +676,7 @@ where
         let mut trace_ids: Vec<Option<String>> = Vec::with_capacity(len);
         let mut span_ids: Vec<Option<String>> = Vec::with_capacity(len);
         let mut subject_ids: Vec<Option<String>> = Vec::with_capacity(len);
+        let mut subject_fingerprints: Vec<Option<Vec<u8>>> = Vec::with_capacity(len);
 
         for data in batch {
             let PreparedRequest { data, subject_id } =
@@ -636,28 +698,54 @@ where
             body_parsed_col.push(parsed);
             trace_ids.push(data.trace_id.clone());
             span_ids.push(data.span_id.clone());
+            subject_fingerprints.push(subject_id.as_deref().map(retention::subject_fingerprint));
             subject_ids.push(subject_id);
         }
 
         let query_start = Instant::now();
-        let result = sqlx::query(
+        let result = async {
+            let mut transaction = self.pool.write().begin().await?;
+            lock_capture_subjects(
+                &mut transaction,
+                subject_fingerprints.iter().flatten().cloned(),
+            )
+            .await?;
+            let result = sqlx::query(
             r#"
+            WITH input AS (
+                SELECT * FROM UNNEST(
+                    $1::uuid[], $2::bigint[], $3::timestamptz[], $4::varchar[],
+                    $5::text[], $6::jsonb[], $7::jsonb[], $8::boolean[],
+                    $9::varchar[], $10::varchar[], $11::text[], $12::bytea[]
+                ) AS u(instance_id, correlation_id, timestamp, method, uri, headers,
+                       body, body_parsed, trace_id, span_id, subject_id, subject_fingerprint)
+            )
             INSERT INTO http_requests (instance_id, correlation_id, timestamp, method, uri, headers, body, body_parsed, trace_id, span_id, subject_id)
-            SELECT * FROM UNNEST($1::uuid[], $2::bigint[], $3::timestamptz[], $4::varchar[], $5::text[], $6::jsonb[], $7::jsonb[], $8::boolean[], $9::varchar[], $10::varchar[], $11::text[])
+            SELECT i.instance_id, i.correlation_id, i.timestamp, i.method, i.uri,
+                   i.headers, i.body, i.body_parsed, i.trace_id, i.span_id, i.subject_id
+            FROM input i
+            LEFT JOIN subject_capture_state erased USING (subject_fingerprint)
+            WHERE i.subject_fingerprint IS NULL
+               OR erased.subject_fingerprint IS NULL
             "#,
-        )
-        .bind(&instance_ids)
-        .bind(&correlation_ids)
-        .bind(&timestamps)
-        .bind(&methods)
-        .bind(&uris)
-        .bind(&headers_col)
-        .bind(&bodies)
-        .bind(&body_parsed_col)
-        .bind(&trace_ids)
-        .bind(&span_ids)
-        .bind(&subject_ids)
-        .execute(self.pool.write())
+            )
+            .bind(&instance_ids)
+            .bind(&correlation_ids)
+            .bind(&timestamps)
+            .bind(&methods)
+            .bind(&uris)
+            .bind(&headers_col)
+            .bind(&bodies)
+            .bind(&body_parsed_col)
+            .bind(&trace_ids)
+            .bind(&span_ids)
+            .bind(&subject_ids)
+            .bind(&subject_fingerprints)
+            .execute(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
+            Ok::<_, sqlx::Error>(result)
+        }
         .await;
         let query_duration = query_start.elapsed();
         histogram!("outlet_write_duration_seconds", "operation" => "request_batch")
@@ -695,6 +783,7 @@ where
         let mut duration_to_first_byte_ms_col = Vec::with_capacity(len);
         let mut duration_ms_col = Vec::with_capacity(len);
         let mut subject_ids: Vec<Option<String>> = Vec::with_capacity(len);
+        let mut subject_fingerprints: Vec<Option<Vec<u8>>> = Vec::with_capacity(len);
 
         for (request_data, response_data) in batch {
             let PreparedResponse {
@@ -722,27 +811,55 @@ where
             duration_to_first_byte_ms_col
                 .push(response_data.duration_to_first_byte.as_millis() as i64);
             duration_ms_col.push(response_data.duration.as_millis() as i64);
+            subject_fingerprints.push(subject_id.as_deref().map(retention::subject_fingerprint));
             subject_ids.push(subject_id);
         }
 
         let query_start = Instant::now();
-        let result = sqlx::query(
+        let result = async {
+            let mut transaction = self.pool.write().begin().await?;
+            lock_capture_subjects(
+                &mut transaction,
+                subject_fingerprints.iter().flatten().cloned(),
+            )
+            .await?;
+            let result = sqlx::query(
             r#"
+            WITH input AS (
+                SELECT * FROM UNNEST(
+                    $1::uuid[], $2::bigint[], $3::timestamptz[], $4::int[],
+                    $5::jsonb[], $6::jsonb[], $7::boolean[], $8::bigint[],
+                    $9::bigint[], $10::text[], $11::bytea[]
+                ) AS u(instance_id, correlation_id, timestamp, status_code, headers,
+                       body, body_parsed, duration_to_first_byte_ms, duration_ms,
+                       subject_id, subject_fingerprint)
+            )
             INSERT INTO http_responses (instance_id, correlation_id, timestamp, status_code, headers, body, body_parsed, duration_to_first_byte_ms, duration_ms, subject_id)
-            SELECT * FROM UNNEST($1::uuid[], $2::bigint[], $3::timestamptz[], $4::int[], $5::jsonb[], $6::jsonb[], $7::boolean[], $8::bigint[], $9::bigint[], $10::text[])
+            SELECT i.instance_id, i.correlation_id, i.timestamp, i.status_code,
+                   i.headers, i.body, i.body_parsed, i.duration_to_first_byte_ms,
+                   i.duration_ms, i.subject_id
+            FROM input i
+            LEFT JOIN subject_capture_state erased USING (subject_fingerprint)
+            WHERE i.subject_fingerprint IS NULL
+               OR erased.subject_fingerprint IS NULL
             "#,
-        )
-        .bind(&instance_ids)
-        .bind(&correlation_ids)
-        .bind(&timestamps)
-        .bind(&status_codes)
-        .bind(&headers_col)
-        .bind(&bodies)
-        .bind(&body_parsed_col)
-        .bind(&duration_to_first_byte_ms_col)
-        .bind(&duration_ms_col)
-        .bind(&subject_ids)
-        .execute(self.pool.write())
+            )
+            .bind(&instance_ids)
+            .bind(&correlation_ids)
+            .bind(&timestamps)
+            .bind(&status_codes)
+            .bind(&headers_col)
+            .bind(&bodies)
+            .bind(&body_parsed_col)
+            .bind(&duration_to_first_byte_ms_col)
+            .bind(&duration_ms_col)
+            .bind(&subject_ids)
+            .bind(&subject_fingerprints)
+            .execute(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
+            Ok::<_, sqlx::Error>(result)
+        }
         .await;
         let query_duration = query_start.elapsed();
         histogram!("outlet_write_duration_seconds", "operation" => "response_batch")
@@ -908,6 +1025,148 @@ mod tests {
             .await
             .unwrap();
         assert!(non_matching.is_empty());
+    }
+
+    #[sqlx::test]
+    async fn erased_subject_cannot_be_recreated_by_late_single_or_batch_capture(pool: PgPool) {
+        crate::migrator().run(&pool).await.unwrap();
+        let handler = PostgresHandler::<_, Value, Value>::from_pool(pool.clone())
+            .await
+            .unwrap()
+            .with_capture_policy(
+                CapturePolicy::all()
+                    .with_subject_header("x-capture-subject")
+                    .unwrap(),
+            );
+        let retention = retention::RetentionRepository::new(pool.clone());
+        retention
+            .delete_subject_batch("erased-subject", retention::BatchSize::new(10).unwrap())
+            .await
+            .unwrap();
+
+        let mut single = request_with_headers([("x-capture-subject", "erased-subject")]);
+        single.correlation_id = 701;
+        handler.handle_request(single.clone()).await;
+        handler
+            .handle_response(single, create_test_response_data())
+            .await;
+
+        let mut blocked_batch = request_with_headers([("x-capture-subject", "erased-subject")]);
+        blocked_batch.correlation_id = 702;
+        let mut allowed_batch = request_with_headers([("x-capture-subject", "active-subject")]);
+        allowed_batch.correlation_id = 703;
+        handler
+            .handle_request_batch(&[blocked_batch.clone(), allowed_batch.clone()])
+            .await;
+        handler
+            .handle_response_batch(&[
+                (blocked_batch, create_test_response_data()),
+                (allowed_batch, create_test_response_data()),
+            ])
+            .await;
+
+        let captured: Vec<(i64, Option<String>)> = sqlx::query_as(
+            "SELECT correlation_id, subject_id FROM http_requests ORDER BY correlation_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(captured, vec![(703, Some("active-subject".to_string()))]);
+        let blocked_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM http_responses WHERE subject_id = 'erased-subject'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(blocked_count, 0);
+        let coordination_rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM subject_capture_state")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            coordination_rows, 1,
+            "ordinary capture must not create or update hot coordination rows"
+        );
+    }
+
+    #[sqlx::test]
+    async fn capture_waiting_on_erasure_observes_committed_tombstone(pool: PgPool) {
+        crate::migrator().run(&pool).await.unwrap();
+        let subject = "racing-subject";
+        let fingerprint = retention::subject_fingerprint(subject);
+        let mut erasure = pool.begin().await.unwrap();
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock( \
+                 hashtextextended('outlet-subject-erasure:' || encode($1, 'hex'), 0) \
+             )",
+        )
+        .bind(&fingerprint)
+        .execute(&mut *erasure)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO subject_capture_state (subject_fingerprint, erased_at) \
+             VALUES ($1, NOW())",
+        )
+        .bind(&fingerprint)
+        .execute(&mut *erasure)
+        .await
+        .unwrap();
+
+        let handler = PostgresHandler::<_, Value, Value>::from_pool(pool.clone())
+            .await
+            .unwrap()
+            .with_capture_policy(
+                CapturePolicy::all()
+                    .with_subject_header("x-capture-subject")
+                    .unwrap(),
+            );
+        let mut request = request_with_headers([("x-capture-subject", subject)]);
+        request.correlation_id = 704;
+        let mut capture = tokio::spawn(async move { handler.handle_request(request).await });
+
+        let mut observed_waiter = false;
+        for _ in 0..100 {
+            observed_waiter = sqlx::query_scalar(
+                "SELECT EXISTS( \
+                     SELECT 1 FROM pg_locks \
+                     WHERE locktype = 'advisory' AND NOT granted \
+                 )",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if observed_waiter {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            observed_waiter,
+            "capture must wait behind the exclusive erasure lock"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut capture)
+                .await
+                .is_err(),
+            "capture unexpectedly completed before erasure committed"
+        );
+
+        erasure.commit().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), capture)
+            .await
+            .unwrap()
+            .unwrap();
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM http_requests WHERE correlation_id = 704")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            count, 0,
+            "post-wait snapshot must observe the erasure tombstone"
+        );
     }
 
     #[sqlx::test]
