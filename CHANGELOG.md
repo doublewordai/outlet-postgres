@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/doublewordai/outlet-postgres/compare/v0.6.0...v0.7.0) - 2026-09-02
+
+### Fixed
+
+- [**breaking**] require outlet 0.10 (opentelemetry 0.32 / tracing-opentelemetry 0.33 stack) ([#86](https://github.com/doublewordai/outlet-postgres/pull/86))
+
 ## [0.6.0](https://github.com/doublewordai/outlet-postgres/compare/v0.5.1...v0.6.0) - 2026-07-17
 
 ### Added

@@ -1004,9 +1004,9 @@ checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
 
 [[package]]
 name = "opentelemetry"
-version = "0.31.0"
+version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b84bcd6ae87133e903af7ef497404dda70c60d0ea14895fc8a5e6722754fc2a0"
+checksum = "b0142c63252a9e054e68a4c61a5778f7b14f576274d593f8ce883d191a099682"
 dependencies = [
  "futures-core",
  "futures-sink",
@@ -1018,9 +1018,9 @@ dependencies = [
 
 [[package]]
 name = "outlet"
-version = "0.9.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "105438f773ecf29bc835501af0d89220f6ae3f7a98a3da14ad58cf2c45d3fdb4"
+checksum = "d3f5cd34417a8df9dfbd4fb50428435a1695cc83675b745386a386509f87f186"
 dependencies = [
  "anyhow",
  "axum",
@@ -1042,7 +1042,7 @@ dependencies = [
 
 [[package]]
 name = "outlet-postgres"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "axum",
  "base64",
@@ -2026,9 +2026,9 @@ dependencies = [
 
 [[package]]
 name = "tracing-opentelemetry"
-version = "0.32.1"
+version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ac28f2d093c6c477eaa76b23525478f38de514fa9aeb1285738d4b97a9552fc"
+checksum = "adbc64cba7137545b8044cb1fe9814f7aacf3c6b5f9b45be8bb5db538befdb26"
 dependencies = [
  "js-sys",
  "opentelemetry",
