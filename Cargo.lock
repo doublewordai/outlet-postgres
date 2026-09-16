@@ -1041,7 +1041,7 @@ dependencies = [
 
 [[package]]
 name = "outlet-postgres"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "axum",
  "base64",
