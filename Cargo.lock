@@ -1018,16 +1018,15 @@ dependencies = [
 
 [[package]]
 name = "outlet"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3f5cd34417a8df9dfbd4fb50428435a1695cc83675b745386a386509f87f186"
+checksum = "5b880de0a52eb124206e78c8c8d91586f460c107b76eacc3474b51b7e068fdcc"
 dependencies = [
  "anyhow",
  "axum",
  "bytes",
  "futures",
  "http-body-util",
- "metrics",
  "opentelemetry",
  "serde",
  "serde_json",
